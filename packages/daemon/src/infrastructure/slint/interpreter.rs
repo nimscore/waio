@@ -1,7 +1,9 @@
 use crate::infrastructure::lua;
 use crate::infrastructure::wayland::{AuraSurface, WlState};
 use crate::usecase::render::{RenderError, Renderer};
-use slint::platform::software_renderer::{LineBufferProvider, SoftwareRenderer};
+use slint::platform::software_renderer::{
+    LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, SoftwareRenderer,
+};
 use slint_interpreter::{Compiler, ComponentHandle, ComponentInstance};
 use smithay_client_toolkit::reexports::client::QueueHandle;
 use std::cell::RefCell;
@@ -12,15 +14,16 @@ use waio_shared::entity::Aura;
 
 struct AuraInstance {
     instance: ComponentInstance,
+    window: Rc<MinimalSoftwareWindow>,
 }
 
 struct FrameBuffer<'a> {
     frame_buffer: &'a mut [u8],
-    width: u32,
+    stride: usize,
 }
 
 impl<'a> LineBufferProvider for FrameBuffer<'a> {
-    type TargetPixel = slint::Rgb8Pixel;
+    type TargetPixel = slint::platform::software_renderer::Rgb8Pixel;
 
     fn process_line(
         &mut self,
@@ -28,13 +31,14 @@ impl<'a> LineBufferProvider for FrameBuffer<'a> {
         range: core::ops::Range<usize>,
         render_fn: impl FnOnce(&mut [Self::TargetPixel]),
     ) {
-        let line_begin = line * (self.width as usize);
+        let line_begin = line * self.stride;
         let slice_start = (line_begin + range.start) * 4;
         let slice_end = (line_begin + range.end) * 4;
         if slice_end <= self.frame_buffer.len() {
             let pixel_slice = unsafe {
                 std::slice::from_raw_parts_mut(
-                    self.frame_buffer[slice_start..slice_end].as_mut_ptr() as *mut slint::Rgb8Pixel,
+                    self.frame_buffer[slice_start..slice_end].as_mut_ptr()
+                        as *mut slint::platform::software_renderer::Rgb8Pixel,
                     range.len(),
                 )
             };
@@ -73,15 +77,9 @@ impl SlintRenderer {
 
         for diag in result.diagnostics() {
             match diag.level() {
-                slint_interpreter::DiagnosticLevel::Error => {
-                    error!("Slint: {}", diag);
-                }
-                slint_interpreter::DiagnosticLevel::Warning => {
-                    warn!("Slint: {}", diag);
-                }
-                _ => {
-                    info!("Slint: {}", diag);
-                }
+                slint_interpreter::DiagnosticLevel::Error => error!("Slint: {}", diag),
+                slint_interpreter::DiagnosticLevel::Warning => warn!("Slint: {}", diag),
+                _ => info!("Slint: {}", diag),
             }
         }
 
@@ -126,19 +124,24 @@ impl SlintRenderer {
             let _ = lua.load(code).exec();
         }
 
-        let width = surface.width;
-        let height = surface.height;
+        let width = surface.width as usize;
+        let height = surface.height as usize;
 
-        // Set window size on the instance
-        let window = instance.window();
-        window.set_size(slint::PhysicalSize::new(width, height));
+        // Create MinimalSoftwareWindow - this is the key!
+        let sw_window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        sw_window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
 
-        // Create renderer and render
-        let renderer = SoftwareRenderer::default();
+        // Show component on this window
+        let slint_window = instance.window();
+        slint_window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
 
+        // Request redraw
+        sw_window.request_redraw();
+
+        // Render into canvas
         surface
-            .draw(|canvas, w, h| {
-                // Clear canvas first (gray background)
+            .draw(|canvas, w, _h| {
+                // Clear with dark gray background
                 for pixel in canvas.chunks_exact_mut(4) {
                     pixel[0] = 0x2d; // B
                     pixel[1] = 0x2d; // G
@@ -146,17 +149,25 @@ impl SlintRenderer {
                     pixel[3] = 0xff; // A
                 }
 
-                // Now render Slint on top
+                // Render Slint UI on top
                 let mut frame_buffer = FrameBuffer {
                     frame_buffer: canvas,
-                    width: w,
+                    stride: w as usize,
                 };
-                renderer.render_by_line(frame_buffer);
+                sw_window.draw_if_needed(|renderer| {
+                    renderer.render_by_line(&mut frame_buffer);
+                });
             })
             .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
 
         let mut auras = self.auras.borrow_mut();
-        auras.insert(aura.id.clone(), AuraInstance { instance });
+        auras.insert(
+            aura.id.clone(),
+            AuraInstance {
+                instance,
+                window: sw_window,
+            },
+        );
 
         info!("Aura '{}' rendered successfully", aura.name);
         Ok(())
