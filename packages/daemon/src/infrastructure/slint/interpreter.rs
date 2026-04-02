@@ -2,7 +2,7 @@ use crate::infrastructure::lua;
 use crate::infrastructure::wayland::{AuraSurface, WlState};
 use crate::usecase::render::{RenderError, Renderer};
 use slint::platform::software_renderer::{LineBufferProvider, SoftwareRenderer};
-use slint_interpreter::{Compiler, ComponentInstance};
+use slint_interpreter::{Compiler, ComponentHandle, ComponentInstance};
 use smithay_client_toolkit::reexports::client::QueueHandle;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -12,7 +12,6 @@ use waio_shared::entity::Aura;
 
 struct AuraInstance {
     instance: ComponentInstance,
-    surface: AuraSurface,
 }
 
 struct FrameBuffer<'a> {
@@ -127,11 +126,28 @@ impl SlintRenderer {
             let _ = lua.load(code).exec();
         }
 
+        let width = surface.width;
+        let height = surface.height;
+
+        // Set window size on the instance
+        let window = instance.window();
+        window.set_size(slint::PhysicalSize::new(width, height));
+
+        // Create renderer and render
         let renderer = SoftwareRenderer::default();
 
         surface
-            .draw(|canvas, w, _h| {
-                let frame_buffer = FrameBuffer {
+            .draw(|canvas, w, h| {
+                // Clear canvas first (gray background)
+                for pixel in canvas.chunks_exact_mut(4) {
+                    pixel[0] = 0x2d; // B
+                    pixel[1] = 0x2d; // G
+                    pixel[2] = 0x2d; // R
+                    pixel[3] = 0xff; // A
+                }
+
+                // Now render Slint on top
+                let mut frame_buffer = FrameBuffer {
                     frame_buffer: canvas,
                     width: w,
                 };
@@ -140,13 +156,7 @@ impl SlintRenderer {
             .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
 
         let mut auras = self.auras.borrow_mut();
-        auras.insert(
-            aura.id.clone(),
-            AuraInstance {
-                instance,
-                surface: unsafe { std::ptr::read(surface as *const _) },
-            },
-        );
+        auras.insert(aura.id.clone(), AuraInstance { instance });
 
         info!("Aura '{}' rendered successfully", aura.name);
         Ok(())
@@ -157,44 +167,8 @@ impl SlintRenderer {
         aura: &Aura,
         wl_state: &mut WlState,
     ) -> Result<(), RenderError> {
-        info!("Rendering aura: {}", aura.name);
-
-        let definition = self.compile(&aura.slint_code)?;
-        let instance = definition
-            .create()
-            .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
-
-        if let Some(ref code) = aura.lua_code {
-            let lua = self.lua_state.borrow();
-            let _ = lua.load(code).exec();
-        }
-
-        let mut surface = AuraSurface::new(
-            &self.compositor,
-            &wl_state.layer_shell,
-            &wl_state.shm,
-            &self.qh,
-            &aura.config,
-        )
-        .map_err(|e| RenderError::WaylandError(e.to_string()))?;
-
-        let renderer = SoftwareRenderer::default();
-
-        surface
-            .draw(|canvas, w, _h| {
-                let frame_buffer = FrameBuffer {
-                    frame_buffer: canvas,
-                    width: w,
-                };
-                renderer.render_by_line(frame_buffer);
-            })
-            .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
-
-        let mut auras = self.auras.borrow_mut();
-        auras.insert(aura.id.clone(), AuraInstance { instance, surface });
-
-        info!("Aura '{}' rendered successfully", aura.name);
-        Ok(())
+        let mut surface = self.create_surface(aura, wl_state)?;
+        self.draw_aura(aura, &mut surface)
     }
 }
 
