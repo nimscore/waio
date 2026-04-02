@@ -3,7 +3,10 @@
     "allow": [
       "WebFetch(github.com)",
       "WebFetch(wayland-book.com)",
-      "WebFetch(raw.githubusercontent.com)"
+      "WebFetch(raw.githubusercontent.com)",
+      "WebFetch(docs.slint.dev)",
+      "WebFetch(docs.rs)",
+      "WebSearch"
     ]
   },
   "$version": 3
