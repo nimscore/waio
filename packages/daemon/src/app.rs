@@ -3,6 +3,7 @@ use crate::infrastructure::wayland::WaylandConnection;
 use anyhow::Result;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use std::rc::Rc;
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,12 +18,13 @@ pub fn run() -> Result<()> {
         );
     }
 
-    // Connect to Wayland - returns connection, event_queue, and state
     let (wl_conn, event_queue, mut wl_state) = WaylandConnection::connect()?;
 
-    let renderer = SlintRenderer::new(wl_conn.compositor.clone(), wl_conn.qh.clone());
+    let renderer = Rc::new(SlintRenderer::new(
+        wl_conn.compositor.clone(),
+        wl_conn.qh.clone(),
+    ));
 
-    // Setup calloop event loop with the event_queue from connection
     let mut event_loop: EventLoop<crate::infrastructure::wayland::WlState> =
         EventLoop::try_new().expect("Failed to create event loop");
 
@@ -30,7 +32,25 @@ pub fn run() -> Result<()> {
         .insert(event_loop.handle())
         .expect("Failed to insert WaylandSource");
 
-    // Dispatch once to process initial globals
+    // Render timer: process commands + redraw
+    let renderer_for_timer = renderer.clone();
+    event_loop
+        .handle()
+        .insert_source(
+            smithay_client_toolkit::reexports::calloop::timer::Timer::from_duration(
+                Duration::from_millis(16),
+            ),
+            move |_, _, _| {
+                let _ = renderer_for_timer.process_commands();
+                let _ = renderer_for_timer.redraw_all();
+                smithay_client_toolkit::reexports::calloop::timer::TimeoutAction::ToDuration(
+                    Duration::from_millis(16),
+                )
+            },
+        )
+        .expect("Failed to insert timer");
+
+    // Initial dispatch
     event_loop
         .dispatch(Duration::from_millis(100), &mut wl_state)
         .expect("Initial dispatch failed");
@@ -55,24 +75,15 @@ pub fn run() -> Result<()> {
 
     info!("Created test aura: {}", test_aura.id);
 
-    // Step 1: Create surface (initial commit without buffer)
-    let mut surface = renderer.create_surface(&test_aura, &mut wl_state)?;
+    renderer.render_aura_with_state(&test_aura, &mut wl_state)?;
 
-    // Step 2: Dispatch to handle configure
+    // Dispatch for configure
     event_loop
         .dispatch(Duration::from_millis(100), &mut wl_state)
         .expect("Configure dispatch failed");
 
-    // Step 3: Now draw on the surface
-    renderer.draw_aura(&test_aura, &mut surface)?;
-
-    // Store surface so it doesn't get dropped
-    // For MVP we'll just forget it
-    std::mem::forget(surface);
-
     info!("Waio Daemon running. Press Ctrl+C to stop.");
 
-    // Main event loop
     loop {
         event_loop
             .dispatch(Duration::from_millis(16), &mut wl_state)
