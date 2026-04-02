@@ -1,1 +1,8 @@
 docs/chat.json
+/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+
+
+waio-daemon.log

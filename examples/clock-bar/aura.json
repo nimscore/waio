@@ -1,0 +1,15 @@
+{
+  "id": "clock-bar-example",
+  "name": "Clock Bar",
+  "aura_type": "Bar",
+  "slint_code": "export component AuraBar inherits Window { width: 1920px; height: 40px; background: #2d2d2d; in property <string> time_text: \"\"; in property <string> date_text: \"\"; Text { text: parent.time_text; color: #ffffff; font-size: 18px; x: 10px; y: (parent.height - self.height) / 2; } Text { text: parent.date_text; color: #aaaaaa; font-size: 14px; x: 150px; y: (parent.height - self.height) / 2; } }",
+  "lua_code": "waio.timer.interval(1000, function() local time = waio.time.now() local date = waio.time.format('%Y-%m-%d') slint.set_property('time_text', time.str) slint.set_property('date_text', date) end)",
+  "config": {
+    "anchor": "Top",
+    "size": {
+      "width": 1920,
+      "height": 40
+    },
+    "exclusive_zone": 40
+  }
+}

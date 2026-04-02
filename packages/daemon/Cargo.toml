@@ -1,0 +1,28 @@
+[package]
+name = "waio-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+waio-shared = { path = "../shared" }
+slint = { workspace = true }
+slint-interpreter = { workspace = true }
+mlua = { workspace = true }
+chrono = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+wayland-protocols = { workspace = true }
+calloop = { workspace = true }
+calloop-wayland-source = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+spin_on = "0.1"
+tempfile = { workspace = true }

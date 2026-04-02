@@ -1,0 +1,25 @@
+export component AuraBar inherits Window {
+    width: 1920px;
+    height: 40px;
+    background: #2d2d2d;
+
+    in property <string> time_text: "";
+    in property <string> date_text: "";
+
+    Text {
+        text: parent.time_text;
+        color: #ffffff;
+        font-size: 18px;
+        font-weight: bold;
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+    }
+
+    Text {
+        text: parent.date_text;
+        color: #aaaaaa;
+        font-size: 14px;
+        x: 150px;
+        y: (parent.height - self.height) / 2;
+    }
+}
