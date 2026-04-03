@@ -54,9 +54,7 @@ pub struct AuraSurface {
     state: SurfaceState,
     /// Shared memory pool for buffer allocation.
     pool: SlotPool,
-    /// Originally requested size (used as fallback if compositor returns 0).
-    requested_size: (u32, u32),
-    /// Queue handle for frame callbacks. Stored here since LayerSurface doesn't expose queue_handle().
+    /// Queue handle for frame callbacks.
     qh: QueueHandle<WlState>,
 }
 
@@ -111,7 +109,6 @@ impl AuraSurface {
                 layer_surface,
             },
             pool,
-            requested_size: (config.size.width, config.size.height),
             qh: qh.clone(),
             id,
         })
@@ -237,9 +234,7 @@ impl AuraSurface {
                 dirty,
                 ..
             } => (surface.clone(), *current_size, *dirty),
-            SurfaceState::Configured {
-                configured_size, ..
-            } => {
+            SurfaceState::Configured { .. } => {
                 // Configured but never rendered — treat as first frame.
                 return self.render_first_frame(render_fn);
             }
@@ -282,20 +277,6 @@ impl AuraSurface {
     /// Check if the surface is in Rendering state.
     pub fn is_rendering(&self) -> bool {
         matches!(self.state, SurfaceState::Rendering { .. })
-    }
-
-    /// Get the current surface dimensions.
-    pub fn size(&self) -> (u32, u32) {
-        match &self.state {
-            SurfaceState::Pending { .. } => self.requested_size,
-            SurfaceState::Configured {
-                configured_size, ..
-            } => *configured_size,
-            SurfaceState::Rendering {
-                current_size, ..
-            } => *current_size,
-            SurfaceState::Closed => (0, 0),
-        }
     }
 
     /// Get a reference to the underlying WlSurface, if it exists.

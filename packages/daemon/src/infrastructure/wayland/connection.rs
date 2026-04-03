@@ -3,7 +3,7 @@ use std::rc::Rc;
 use anyhow::Result;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::reexports::client::globals::{registry_queue_init, GlobalList};
+use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::WlOutput;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, EventQueue, QueueHandle};
@@ -25,16 +25,12 @@ pub struct WlState {
     pub compositor_state: CompositorState,
     pub layer_shell: LayerShell,
     pub shm: Shm,
-    pub conn: Connection,
-    pub qh: QueueHandle<WlState>,
     /// Optional reference to the renderer. Set after renderer is created.
     pub renderer: Option<Rc<SlintRenderer>>,
 }
 
 pub struct WaylandConnection {
-    pub compositor: CompositorState,
     pub conn: Connection,
-    pub globals: GlobalList,
     pub qh: QueueHandle<WlState>,
 }
 
@@ -56,19 +52,12 @@ impl WaylandConnection {
             compositor_state: compositor_state.clone(),
             layer_shell,
             shm,
-            conn: conn.clone(),
-            qh: qh.clone(),
             renderer: None,
         };
 
         info!("Connected to Wayland");
 
-        let wayland_conn = Self {
-            compositor: compositor_state,
-            conn,
-            globals,
-            qh,
-        };
+        let wayland_conn = Self { conn, qh };
 
         Ok((wayland_conn, event_queue, wl_state))
     }

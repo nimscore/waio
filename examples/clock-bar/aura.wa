@@ -19,14 +19,14 @@ config:
 export component AuraBar inherits Window {
     width: 1920px;
     height: 40px;
-    background: #cc0000;
+    background: #1111;
 
     in property <string> time_text: "00:00:00";
     in property <string> date_text: "1970-01-01";
 
     Text {
         text: parent.time_text;
-        color: #00cc00;
+        color: #ffff;
         font-size: 18px;
         font-weight: 700;
         x: 10px;
@@ -35,7 +35,7 @@ export component AuraBar inherits Window {
 
     Text {
         text: parent.date_text;
-        color: #00cc00;
+        color: #ffff;
         font-size: 14px;
         x: 150px;
         y: 12px;
@@ -44,7 +44,7 @@ export component AuraBar inherits Window {
     Rectangle {
         width: parent.width;
         height: 1px;
-        background: #ff3333;
+        background: #ffff;
         y: 39px;
     }
 }

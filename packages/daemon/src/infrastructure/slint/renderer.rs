@@ -2,7 +2,7 @@ use slint::platform::software_renderer::{
     MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel, SoftwareRenderer,
 };
 use slint::PhysicalSize;
-use slint_interpreter::{ComponentInstance, Compiler, Value};
+use slint_interpreter::{Compiler, ComponentInstance, Value};
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
@@ -35,12 +35,7 @@ struct AuraRenderState {
     dirty: bool,
     /// Persistent pixel buffer for Slint rendering.
     /// Wrapped in Rc for cheap cloning (all clones share the same Vec).
-    /// With RepaintBufferType::ReusedBuffer, Slint clears the ENTIRE buffer and
-    /// only re-renders dirty regions. We keep a COPY of the previous frame to
-    /// restore non-dirty pixels after render.
     pixels: Rc<RefCell<Vec<Rgb565Pixel>>>,
-    /// Saved copy of the previous frame's pixels for restoration.
-    saved_pixels: Rc<RefCell<Vec<Rgb565Pixel>>>,
 }
 
 /// Central renderer managing all aura Slint components and Wayland surfaces.
@@ -66,12 +61,9 @@ pub struct SlintRenderer {
 }
 
 impl SlintRenderer {
-    pub fn new(
-        compositor: CompositorState,
-        qh: QueueHandle<WlState>,
-    ) -> Self {
+    pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> Self {
         let lua = mlua::Lua::new();
-        lua::register_all(&lua);
+        let _ = lua::register_all(&lua);
 
         Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
@@ -83,22 +75,13 @@ impl SlintRenderer {
         }
     }
 
-    /// Public accessors for WlState to match surfaces to auras.
-    pub fn surfaces(&self) -> &Rc<RefCell<HashMap<String, AuraSurface>>> {
-        &self.surfaces
-    }
-
     // ─── Aura lifecycle ───
 
     /// Load an aura: compile Slint, create Wayland surface (pending), run Lua.
     ///
     /// The Wayland surface enters `Pending` state and will NOT be drawn until
     /// the compositor sends a `configure` event, triggering `on_surface_configured`.
-    pub fn load_aura(
-        &self,
-        aura: &Aura,
-        wl_state: &mut WlState,
-    ) -> Result<(), RenderError> {
+    pub fn load_aura(&self, aura: &Aura, wl_state: &mut WlState) -> Result<(), RenderError> {
         info!("Loading aura: {} ({})", aura.name, aura.id);
 
         // 1. Compile Slint component from source.
@@ -110,20 +93,24 @@ impl SlintRenderer {
         );
 
         // 2. Create a dedicated MinimalSoftwareWindow for this aura.
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-        window.set_size(PhysicalSize::new(aura.config.size.width, aura.config.size.height));
+        //    NewBuffer allocates a fresh buffer each frame, ensuring Slint draws
+        //    the COMPLETE scene (all text, including unchanged characters).
+        //    With ReusedBuffer, only changed characters are redrawn, leaving
+        //    "ghost" artifacts of old characters when using transparent backgrounds.
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        window.set_size(PhysicalSize::new(
+            aura.config.size.width,
+            aura.config.size.height,
+        ));
 
         // 3. Instantiate the component with this window.
         let component = definition
             .create_with_existing_window(&window)
-            .map_err(|e| {
-                RenderError::SlintCompilationFailed(format!("create component: {}", e))
-            })?;
+            .map_err(|e| RenderError::SlintCompilationFailed(format!("create component: {}", e)))?;
 
-        // 4. Pre-allocate the persistent pixel buffer + save buffer for double-buffering.
+        // 4. Pre-allocate the persistent pixel buffer.
         let pixel_count = (aura.config.size.width * aura.config.size.height) as usize;
         let pixels = Rc::new(RefCell::new(vec![Rgb565Pixel::default(); pixel_count]));
-        let saved_pixels = Rc::new(RefCell::new(vec![Rgb565Pixel::default(); pixel_count]));
 
         // 5. Create the Wayland layer surface (Pending state, initial commit sent).
         let surface = AuraSurface::new(
@@ -148,7 +135,6 @@ impl SlintRenderer {
                     height: aura.config.size.height,
                     dirty: false,
                     pixels,
-                    saved_pixels,
                 },
             );
         }
@@ -200,16 +186,15 @@ impl SlintRenderer {
             let surfaces = self.surfaces.borrow();
             surfaces
                 .iter()
-                .find(|(_, surface)| {
-                    surface
-                        .layer_surface()
-                        .is_some_and(|ls| *ls == *layer)
-                })
+                .find(|(_, surface)| surface.layer_surface().is_some_and(|ls| *ls == *layer))
                 .map(|(id, _)| id.clone())
         };
 
         let Some(id) = aura_id else {
-            warn!("Received configure for unknown layer surface (ptr={:p})", layer);
+            warn!(
+                "Received configure for unknown layer surface (ptr={:p})",
+                layer
+            );
             return Ok(());
         };
 
@@ -242,9 +227,7 @@ impl SlintRenderer {
             let surfaces = self.surfaces.borrow();
             surfaces
                 .iter()
-                .find(|(_, s)| {
-                    s.surface().is_some_and(|ws| *ws == *surface)
-                })
+                .find(|(_, s)| s.surface().is_some_and(|ws| *ws == *surface))
                 .map(|(id, _)| id.clone())
         };
 
@@ -262,11 +245,7 @@ impl SlintRenderer {
             let surfaces = self.surfaces.borrow();
             surfaces
                 .iter()
-                .find(|(_, surface)| {
-                    surface
-                        .layer_surface()
-                        .is_some_and(|ls| *ls == *layer)
-                })
+                .find(|(_, surface)| surface.layer_surface().is_some_and(|ls| *ls == *layer))
                 .map(|(id, _)| id.clone())
         };
 
@@ -396,8 +375,7 @@ impl SlintRenderer {
 
     /// Render the first frame for an aura (triggered after configure).
     fn render_first_frame_for_aura(&self, aura_id: &str) -> Result<(), RenderError> {
-        // Grab render state (including persistent pixels + save buffer), then surface (mutable).
-        let (window, width, height, pixels, saved_pixels) = {
+        let (window, width, height, pixels) = {
             let render_states = self.render_states.borrow();
             let render_state = render_states
                 .get(aura_id)
@@ -408,7 +386,6 @@ impl SlintRenderer {
                 render_state.width,
                 render_state.height,
                 render_state.pixels.clone(),
-                render_state.saved_pixels.clone(),
             )
         };
 
@@ -427,8 +404,6 @@ impl SlintRenderer {
                     width,
                     height,
                     &pixels,
-                    &saved_pixels,
-                    true, // first frame — fill buffer completely
                 );
             })
             .map_err(|e| RenderError::RenderFailed(format!("first frame: {}", e)))
@@ -447,7 +422,7 @@ impl SlintRenderer {
             }
         }
 
-        let (window, width, height, pixels, saved_pixels) = {
+        let (window, width, height, pixels) = {
             let render_states = self.render_states.borrow();
             let render_state = render_states
                 .get(aura_id)
@@ -458,7 +433,6 @@ impl SlintRenderer {
                 render_state.width,
                 render_state.height,
                 render_state.pixels.clone(),
-                render_state.saved_pixels.clone(),
             )
         };
 
@@ -477,8 +451,6 @@ impl SlintRenderer {
                     width,
                     height,
                     &pixels,
-                    &saved_pixels,
-                    false, // not first frame — incremental rendering with restore
                 );
             })
             .map_err(|e| RenderError::RenderFailed(format!("frame: {}", e)))
@@ -489,10 +461,9 @@ impl SlintRenderer {
         code: &str,
     ) -> Result<slint_interpreter::ComponentDefinition, RenderError> {
         let compiler = Compiler::default();
-        let result = spin_on::spin_on(compiler.build_from_source(
-            code.to_string(),
-            std::path::PathBuf::from("virtual.slint"),
-        ));
+        let result = spin_on::spin_on(
+            compiler.build_from_source(code.to_string(), std::path::PathBuf::from("virtual.slint")),
+        );
 
         for diag in result.diagnostics() {
             match diag.level() {
@@ -521,16 +492,10 @@ impl SlintRenderer {
     }
 }
 
-/// Render a Slint component to an ARGB8888 canvas, using a persistent pixel buffer
-/// with double-buffering for restoration.
+/// Render a Slint component to an ARGB8888 canvas.
 ///
-/// PROBLEM: With RepaintBufferType::ReusedBuffer, Slint's render() clears the
-/// ENTIRE buffer and only re-renders dirty regions (e.g. changed text). This causes
-/// non-dirty regions (background, static text) to become transparent/black.
-///
-/// SOLUTION: Before rendering, save the current buffer. After Slint renders,
-/// restore any zero pixels from the saved buffer. This ensures the full scene
-/// is always present, regardless of Slint's damage tracking behavior.
+/// With RepaintBufferType::NewBuffer, Slint allocates a fresh buffer each frame
+/// and draws the COMPLETE scene. No pixel restoration needed.
 fn render_slint_to_canvas_with_persistent_buffer(
     window: &MinimalSoftwareWindow,
     canvas: &mut [u8],
@@ -539,16 +504,13 @@ fn render_slint_to_canvas_with_persistent_buffer(
     _src_w: u32,
     _src_h: u32,
     persistent_pixels: &Rc<RefCell<Vec<Rgb565Pixel>>>,
-    saved_pixels: &Rc<RefCell<Vec<Rgb565Pixel>>>,
-    full_render: bool,
 ) {
     let pixel_count = (canvas_w * canvas_h) as usize;
 
     {
         let mut pixels = persistent_pixels.borrow_mut();
-        let mut saved = saved_pixels.borrow_mut();
 
-        // Resize buffers if needed (e.g. after resize).
+        // Resize buffer if needed.
         if pixels.len() != pixel_count {
             tracing::warn!(
                 "Pixel buffer resized: {} -> {} (possible resize event)",
@@ -556,39 +518,16 @@ fn render_slint_to_canvas_with_persistent_buffer(
                 pixel_count
             );
             pixels.resize(pixel_count, Rgb565Pixel::default());
-            saved.resize(pixel_count, Rgb565Pixel::default());
         }
 
-        // Always request redraw so Slint knows the window needs re-rendering.
-        // Without this, set_property() alone may not trigger proper dirty tracking
-        // in the software renderer with RepaintBufferType::ReusedBuffer.
+        // Always request redraw — Slint draws the COMPLETE scene into a fresh buffer.
         window.request_redraw();
 
-        // For the first frame, zero-fill the buffer so Slint has a clean slate.
-        if full_render {
-            pixels.fill(Rgb565Pixel::default());
-        } else {
-            // Save the current frame BEFORE Slint clears the buffer.
-            // We need to restore non-dirty pixels from this save.
-            saved.copy_from_slice(&*pixels);
-        }
-
-        // Render Slint scene: with ReusedBuffer, this CLEARS the entire buffer
-        // and only re-renders dirty regions.
+        // NewBuffer gives us a clean buffer every time, so Slint renders all text
+        // including unchanged characters. No ghosting artifacts.
         window.draw_if_needed(|renderer: &SoftwareRenderer| {
             renderer.render(&mut *pixels, canvas_w as usize);
         });
-
-        // RESTORE non-dirty pixels from the saved buffer.
-        // Any pixel that Slint cleared to 0 (transparent) should be restored
-        // from the previous frame's content.
-        if !full_render {
-            for i in 0..pixel_count {
-                if pixels[i].0 == 0 {
-                    pixels[i] = saved[i];
-                }
-            }
-        }
 
         // Convert Rgb565 → Argb8888 and write to canvas.
         for (i, pixel) in pixels.iter().enumerate() {
