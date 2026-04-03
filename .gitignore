@@ -4,5 +4,4 @@ docs/chat.json
 Cargo.lock
 .DS_Store
 
-
-waio-daemon.log
+md/*

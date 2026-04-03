@@ -6,7 +6,9 @@
       "WebFetch(raw.githubusercontent.com)",
       "WebFetch(docs.slint.dev)",
       "WebFetch(docs.rs)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(cargo check *)",
+      "Bash(cargo build *)"
     ]
   },
   "$version": 3

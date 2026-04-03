@@ -3,7 +3,7 @@ resolver = "2"
 members = ["packages/shared", "packages/daemon", "packages/cli"]
 
 [workspace.dependencies]
-slint = "1.15"
+slint = { version = "1.15", features = ["renderer-software", "backend-winit"] }
 slint-interpreter = { version = "1.15", features = ["display-diagnostics", "internal"] }
 mlua = { version = "0.11", features = ["lua54", "send", "async"] }
 smithay-client-toolkit = "0.20"

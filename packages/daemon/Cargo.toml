@@ -26,3 +26,4 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 spin_on = "0.1"
 tempfile = { workspace = true }
+winit = "0.30"

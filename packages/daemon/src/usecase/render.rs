@@ -30,6 +30,12 @@ impl From<mlua::Error> for RenderError {
     }
 }
 
+impl From<String> for RenderError {
+    fn from(e: String) -> Self {
+        RenderError::RenderFailed(e)
+    }
+}
+
 pub struct RenderUseCase<R: Renderer> {
     pub renderer: R,
 }

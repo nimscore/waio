@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+use std::rc::Rc;
 
 use anyhow::Result;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
@@ -15,7 +15,9 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
 };
-use tracing::info;
+use tracing::{debug, info};
+
+use crate::infrastructure::slint::SlintRenderer;
 
 pub struct WlState {
     pub registry_state: RegistryState,
@@ -23,6 +25,10 @@ pub struct WlState {
     pub compositor_state: CompositorState,
     pub layer_shell: LayerShell,
     pub shm: Shm,
+    pub conn: Connection,
+    pub qh: QueueHandle<WlState>,
+    /// Optional reference to the renderer. Set after renderer is created.
+    pub renderer: Option<Rc<SlintRenderer>>,
 }
 
 pub struct WaylandConnection {
@@ -50,6 +56,9 @@ impl WaylandConnection {
             compositor_state: compositor_state.clone(),
             layer_shell,
             shm,
+            conn: conn.clone(),
+            qh: qh.clone(),
+            renderer: None,
         };
 
         info!("Connected to Wayland");
@@ -88,9 +97,16 @@ impl CompositorHandler for WlState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _time: u32,
+        surface: &WlSurface,
+        time: u32,
     ) {
+        debug!("Frame callback: surface time={}", time);
+
+        if let Some(ref renderer) = self.renderer {
+            if let Err(e) = renderer.on_frame_complete(surface) {
+                tracing::warn!("Frame callback error: {}", e);
+            }
+        }
     }
 
     fn surface_enter(
@@ -126,24 +142,37 @@ impl OutputHandler for WlState {
 }
 
 impl LayerShellHandler for WlState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        tracing::info!("Layer surface closed");
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        info!("Layer surface closed");
+
+        if let Some(ref renderer) = self.renderer {
+            renderer.on_surface_closed(layer);
+        }
     }
 
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         serial: u32,
     ) {
-        tracing::info!(
-            "Layer surface configured: {}x{}, serial={}",
+        info!(
+            "Layer surface configure: {:?}x{:?}, serial={}",
             configure.new_size.0,
             configure.new_size.1,
             serial
         );
+
+        // SCTK automatically calls `ack_configure(serial)` BEFORE our callback.
+        // We do NOT need to call it manually.
+
+        if let Some(ref renderer) = self.renderer {
+            if let Err(e) = renderer.on_surface_configured(layer, configure, serial) {
+                tracing::error!("Failed to render after configure: {}", e);
+            }
+        }
     }
 }
 

@@ -19,32 +19,32 @@ config:
 export component AuraBar inherits Window {
     width: 1920px;
     height: 40px;
-    background: #2d2d2d;
-    
+    background: #cc0000;
+
     in property <string> time_text: "00:00:00";
     in property <string> date_text: "1970-01-01";
-    
+
     Text {
         text: parent.time_text;
-        color: #ffffff;
+        color: #00cc00;
         font-size: 18px;
         font-weight: 700;
         x: 10px;
         y: 10px;
     }
-    
+
     Text {
         text: parent.date_text;
-        color: #aaaaaa;
+        color: #00cc00;
         font-size: 14px;
         x: 150px;
         y: 12px;
     }
-    
+
     Rectangle {
         width: parent.width;
         height: 1px;
-        background: #444444;
+        background: #ff3333;
         y: 39px;
     }
 }
@@ -54,7 +54,7 @@ export component AuraBar inherits Window {
 waio.timer.interval(1000, function()
     local time = waio.time.now()
     local date = waio.time.format("%Y-%m-%d")
-    
+
     slint.set_property("time_text", time.str)
     slint.set_property("date_text", date)
 end)

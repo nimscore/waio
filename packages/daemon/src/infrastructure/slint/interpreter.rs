@@ -2,10 +2,10 @@
 
 use crate::infrastructure::lua;
 use crate::infrastructure::slint::aura_handle::{new_command_queue, CommandQueue};
+use crate::infrastructure::slint::software_renderer::SoftwareRenderHandler;
 use crate::infrastructure::wayland::{AuraSurface, WlState};
 use crate::usecase::render::{RenderError, Renderer};
-use slint::platform::software_renderer::{LineBufferProvider, Rgb565Pixel};
-use slint_interpreter::{Compiler, ComponentHandle, ComponentInstance, SharedString, Value};
+use slint_interpreter::Compiler;
 use smithay_client_toolkit::reexports::client::QueueHandle;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,37 +14,7 @@ use tracing::{error, info, warn};
 use waio_shared::entity::Aura;
 
 pub struct AuraInstance {
-    pub instance: ComponentInstance,
     pub surface: AuraSurface,
-}
-
-struct FrameBuffer<'a> {
-    frame_buffer: &'a mut [u8],
-    stride: usize,
-}
-
-impl<'a> LineBufferProvider for FrameBuffer<'a> {
-    type TargetPixel = Rgb565Pixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: core::ops::Range<usize>,
-        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
-    ) {
-        let line_begin = line * self.stride;
-        let slice_start = (line_begin + range.start) * 2;
-        let slice_end = (line_begin + range.end) * 2;
-        if slice_end <= self.frame_buffer.len() {
-            let pixel_slice = unsafe {
-                std::slice::from_raw_parts_mut(
-                    self.frame_buffer[slice_start..slice_end].as_mut_ptr() as *mut Rgb565Pixel,
-                    range.len(),
-                )
-            };
-            render_fn(pixel_slice);
-        }
-    }
 }
 
 pub struct SlintRenderer {
@@ -53,6 +23,7 @@ pub struct SlintRenderer {
     auras: Rc<RefCell<HashMap<String, AuraInstance>>>,
     lua_state: Rc<RefCell<mlua::Lua>>,
     command_queue: CommandQueue,
+    software_handler: Rc<RefCell<SoftwareRenderHandler>>,
 }
 
 impl SlintRenderer {
@@ -68,6 +39,7 @@ impl SlintRenderer {
             auras: Rc::new(RefCell::new(HashMap::new())),
             lua_state: Rc::new(RefCell::new(lua)),
             command_queue: new_command_queue(),
+            software_handler: Rc::new(RefCell::new(SoftwareRenderHandler::new())),
         }
     }
 
@@ -109,82 +81,73 @@ impl SlintRenderer {
         if commands.is_empty() {
             return Ok(());
         }
-        let mut auras = self.auras.borrow_mut();
+
+        let handler = self.software_handler.borrow();
         for cmd in commands {
-            if let Some(aura_inst) = auras.get_mut(&cmd.aura_id) {
-                info!("Applying: {} = {}", cmd.property, cmd.value);
-                let _ = aura_inst
-                    .instance
-                    .set_property(&cmd.property, Value::String(SharedString::from(&cmd.value)));
-                aura_inst.instance.window().request_redraw();
-            }
+            info!("Sending property update: {} = {}", cmd.property, cmd.value);
+            handler.set_property(&cmd.property, &cmd.value);
         }
         Ok(())
     }
 
     /// Redraw all auras
     pub fn redraw_all(&self) -> Result<(), RenderError> {
+        let render_result = {
+            let handler = self.software_handler.borrow();
+            handler.render()
+        };
+
         let mut auras = self.auras.borrow_mut();
         for (_, aura_inst) in auras.iter_mut() {
-            let window = aura_inst.instance.window();
-            let window_size = window.size();
-            tracing::info!(
-                "Redrawing aura: window_size={}x{}",
-                window_size.width,
-                window_size.height
-            );
-            window.request_redraw();
-
-            let width = window_size.width as usize;
-            let height = window_size.height as usize;
-
             tracing::debug!(
                 "Canvas size: {}x{} ({} bytes expected)",
                 aura_inst.surface.width,
                 aura_inst.surface.height,
-                aura_inst.surface.width * aura_inst.surface.height * 2
+                aura_inst.surface.width * aura_inst.surface.height * 4
             );
+
+            let render_result = render_result.clone();
 
             aura_inst
                 .surface
-                .draw(move |canvas, w, h| {
+                .draw(move |canvas, canvas_w, canvas_h| {
                     tracing::debug!(
                         "draw callback: canvas len={}, w={}, h={}",
                         canvas.len(),
-                        w,
-                        h
+                        canvas_w,
+                        canvas_h
                     );
 
-                    if let Ok(snapshot) = window.take_snapshot() {
-                        let src = snapshot.as_bytes();
-                        let src_stride = snapshot.width() as usize * 4;
-                        tracing::info!(
-                            "Snapshot: {}x{}, {} bytes",
-                            snapshot.width(),
-                            snapshot.height(),
-                            src.len()
-                        );
+                    match &render_result {
+                        Ok(src) => {
+                            if src.is_empty() {
+                                canvas.fill(0xCC);
+                                tracing::debug!("Empty render - placeholder");
+                                return;
+                            }
+                            let src_stride = canvas_w as usize * 4;
+                            let dst_stride = canvas_w as usize * 4;
+                            let height = canvas_h as usize;
+                            let width = canvas_w as usize;
 
-                        let dst_stride = w as usize * 2;
-                        for y in 0..height.min(canvas.len() / (w as usize * 2)) {
-                            for x in 0..width.min(canvas.len() / 2) {
-                                let src_idx = y * src_stride + x * 4;
-                                let dst_idx = y * dst_stride + x * 2;
-                                if dst_idx + 1 < canvas.len() && src_idx + 3 < src.len() {
-                                    let r = (src[src_idx] >> 3) as u16;
-                                    let g = (src[src_idx + 1] >> 2) as u16;
-                                    let b = (src[src_idx + 2] >> 3) as u16;
-                                    let pixel = (b << 10) | (g << 5) | r;
-                                    canvas[dst_idx] = pixel as u8;
-                                    canvas[dst_idx + 1] = (pixel >> 8) as u8;
+                            for y in 0..height.min(canvas.len() / (canvas_w as usize * 4)) {
+                                for x in 0..width.min(canvas.len() / 4) {
+                                    let src_idx = y * src_stride + x * 4;
+                                    let dst_idx = y * dst_stride + x * 4;
+                                    if dst_idx + 3 < canvas.len() && src_idx + 3 < src.len() {
+                                        canvas[dst_idx + 0] = src[src_idx + 2]; // B
+                                        canvas[dst_idx + 1] = src[src_idx + 1]; // G
+                                        canvas[dst_idx + 2] = src[src_idx + 0]; // R
+                                        canvas[dst_idx + 3] = src[src_idx + 3]; // A
+                                    }
                                 }
                             }
+                            tracing::debug!("Render complete");
                         }
-                        tracing::debug!("Render complete");
-                    } else {
-                        tracing::error!("take_snapshot failed!");
-                        // Fill with test pattern
-                        canvas.fill(0xAA);
+                        Err(e) => {
+                            tracing::error!("Render error: {}", e);
+                            canvas.fill(0xAA);
+                        }
                     }
                 })
                 .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
@@ -199,23 +162,21 @@ impl SlintRenderer {
     ) -> Result<(), RenderError> {
         info!("Rendering aura: {}", aura.name);
 
-        let definition = self.compile(&aura.slint_code)?;
+        {
+            let mut handler = self.software_handler.borrow_mut();
+            handler.create_component(
+                &aura.slint_code,
+                aura.config.size.width,
+                aura.config.size.height,
+            )?;
+        }
 
-        // Create instance - this creates the component with its own internal window
-        let instance = definition
-            .create()
-            .map_err(|e| RenderError::RenderFailed(format!("create: {}", e)))?;
-
-        // Get the window from the instance to set size
-        let window = instance.window();
-        window.set_size(slint::WindowSize::Physical(slint::PhysicalSize::new(
-            aura.config.size.width,
-            aura.config.size.height,
-        )));
-
-        // Set initial properties
-        let _ = instance.set_property("time_text", Value::String("00:00:00".into()));
-        let _ = instance.set_property("date_text", Value::String("2026-01-01".into()));
+        self.software_handler
+            .borrow()
+            .set_property("time_text", "00:00:00");
+        self.software_handler
+            .borrow()
+            .set_property("date_text", "2026-01-01");
 
         // Run Lua code with command queue bridge
         if let Some(ref code) = aura.lua_code {
@@ -241,17 +202,14 @@ impl SlintRenderer {
         )
         .map_err(|e| RenderError::WaylandError(e.to_string()))?;
 
-        // Initial render - placeholder (full rendering requires window adapter integration)
-        window.request_redraw();
         surface
             .draw(|canvas, _w, _h| {
                 canvas.fill(0);
             })
             .map_err(|e| RenderError::RenderFailed(e.to_string()))?;
 
-        // 7. Store
         let mut auras = self.auras.borrow_mut();
-        auras.insert(aura.id.clone(), AuraInstance { instance, surface });
+        auras.insert(aura.id.clone(), AuraInstance { surface });
 
         info!("Aura '{}' rendered successfully", aura.name);
         Ok(())
