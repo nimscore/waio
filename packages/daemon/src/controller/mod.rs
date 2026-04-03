@@ -1,3 +1,4 @@
 pub mod cli;
+pub mod ipc_server;
 
-pub use cli::*;
+pub use ipc_server::IpcServer;

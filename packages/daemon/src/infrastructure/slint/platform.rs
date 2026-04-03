@@ -1,7 +1,10 @@
+#![allow(dead_code)]
+
 use slint::platform::software_renderer::SoftwareRenderer;
 use slint::Window;
 
 /// Рендерит Slint компонент в Wayland SHM буфер
+#[allow(unused_variables)]
 pub fn render_frame(
     renderer: &SoftwareRenderer,
     window: &Window,

@@ -32,12 +32,32 @@ pub struct Size {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LayerAnchor {
     Top,
     Bottom,
     Left,
     Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl LayerAnchor {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "top" => LayerAnchor::Top,
+            "bottom" => LayerAnchor::Bottom,
+            "left" => LayerAnchor::Left,
+            "right" => LayerAnchor::Right,
+            "top-left" | "topleft" => LayerAnchor::TopLeft,
+            "top-right" | "topright" => LayerAnchor::TopRight,
+            "bottom-left" | "bottomleft" => LayerAnchor::BottomLeft,
+            "bottom-right" | "bottomright" => LayerAnchor::BottomRight,
+            _ => LayerAnchor::Top,
+        }
+    }
 }
 
 impl Aura {

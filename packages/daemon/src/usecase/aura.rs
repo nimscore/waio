@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use waio_shared::entity::{Aura, AuraError, AuraType};
 
 pub trait AuraRepository {

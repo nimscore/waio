@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::infrastructure::slint::aura_handle::{CommandQueue, PropertyUpdate};
 use mlua::prelude::*;
 

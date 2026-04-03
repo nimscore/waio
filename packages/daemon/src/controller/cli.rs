@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::infrastructure::repository::FileAuraRepository;
 use crate::usecase::aura::AuraUseCase;
 use anyhow::Result;

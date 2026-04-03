@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["packages/shared", "packages/daemon"]
+members = ["packages/shared", "packages/daemon", "packages/cli"]
 
 [workspace.dependencies]
 slint = "1.15"
-slint-interpreter = { version = "1.15", features = ["display-diagnostics"] }
+slint-interpreter = { version = "1.15", features = ["display-diagnostics", "internal"] }
 mlua = { version = "0.11", features = ["lua54", "send", "async"] }
 smithay-client-toolkit = "0.20"
 wayland-protocols-wlr = "0.3"
@@ -23,3 +23,5 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 chrono = "0.4"
 tempfile = "3"
+serde_yaml = "0.9"
+regex = "1"

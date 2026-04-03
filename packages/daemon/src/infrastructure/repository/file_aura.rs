@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::usecase::aura::AuraRepository;
 use std::fs;
 use std::path::PathBuf;

@@ -1,12 +1,34 @@
+use crate::controller::IpcServer;
 use crate::infrastructure::slint::SlintRenderer;
 use crate::infrastructure::wayland::WaylandConnection;
+use crate::usecase::render::Renderer;
 use anyhow::Result;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use waio_shared::entity::{Aura, AuraFile};
+use waio_shared::protocol::{DaemonMethod, JsonRpcRequest, JsonRpcResponse, rpc_success, rpc_error};
+
+pub enum IpcCommand {
+    Request(JsonRpcRequest, tokio::sync::oneshot::Sender<JsonRpcResponse>),
+}
+
+pub struct AppState {
+    pub auras: Arc<Mutex<HashMap<String, Aura>>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            auras: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
 
 pub fn run() -> Result<()> {
     info!("Starting Waio Daemon...");
@@ -32,7 +54,6 @@ pub fn run() -> Result<()> {
         .insert(event_loop.handle())
         .expect("Failed to insert WaylandSource");
 
-    // Render timer: process commands + redraw
     let renderer_for_timer = renderer.clone();
     event_loop
         .handle()
@@ -50,44 +71,197 @@ pub fn run() -> Result<()> {
         )
         .expect("Failed to insert timer");
 
-    // Initial dispatch
     event_loop
         .dispatch(Duration::from_millis(100), &mut wl_state)
         .expect("Initial dispatch failed");
 
-    // Create aura
-    let lua_code = r#"
-        waio.timer.interval(1000, function()
-            local time = waio.time.now()
-            local date = waio.time.format("%Y-%m-%d")
-            slint.set_property("time_text", time.str)
-            slint.set_property("date_text", date)
-        end)
-        print("Clock aura started!")
-    "#;
+    let state = AppState::new();
+    let auras = state.auras.clone();
+    let renderer_for_ipc = renderer.clone();
+    
+    let (tx, rx) = std::sync::mpsc::channel::<IpcCommand>();
 
-    let mut test_aura = crate::usecase::aura::create_aura_without_repo(
-        "test-bar".into(),
-        waio_shared::entity::Aura::default().slint_code,
-        waio_shared::entity::AuraType::Bar,
-    )?;
-    test_aura.lua_code = Some(lua_code.to_string());
+    {
+        let tx = tx.clone();
+        let handler = move |request: JsonRpcRequest| {
+            let tx = tx.clone();
+            async move {
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(IpcCommand::Request(request, response_tx));
+                response_rx.await.unwrap_or_else(|_| {
+                    rpc_error(-32000, "Internal error", None::<String>, 1)
+                })
+            }
+        };
 
-    info!("Created test aura: {}", test_aura.id);
+        let ipc_server = IpcServer::new();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                if let Err(e) = ipc_server.run(handler).await {
+                    tracing::error!("IPC server error: {}", e);
+                }
+            });
+        });
+    }
 
-    renderer.render_aura_with_state(&test_aura, &mut wl_state)?;
-
-    // Dispatch for configure
-    event_loop
-        .dispatch(Duration::from_millis(100), &mut wl_state)
-        .expect("Configure dispatch failed");
-
-    info!("Waio Daemon running. Press Ctrl+C to stop.");
+    info!("Waio Daemon running. Waiting for auras...");
+    info!("Use waio-cli to load auras");
 
     loop {
         event_loop
             .dispatch(Duration::from_millis(16), &mut wl_state)
             .expect("Event loop dispatch failed");
+
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                IpcCommand::Request(request, response_tx) => {
+                    let response = handle_request(
+                        request,
+                        auras.clone(),
+                        renderer_for_ipc.clone(),
+                        &mut wl_state,
+                    );
+                    let _ = response_tx.send(response);
+                }
+            }
+        }
+    }
+}
+
+fn handle_request(
+    request: JsonRpcRequest,
+    auras: Arc<Mutex<HashMap<String, Aura>>>,
+    renderer: Rc<SlintRenderer>,
+    wl_state: &mut crate::infrastructure::wayland::WlState,
+) -> JsonRpcResponse {
+    let method: Result<DaemonMethod, _> = serde_json::from_value(request.params.clone());
+
+    match method {
+        Ok(DaemonMethod::LoadAura { source, path, content, id }) => {
+            let mut auras = match auras.lock() {
+                Ok(a) => a,
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
+            };
+
+            if auras.contains_key(&id) {
+                return rpc_error(-32002, "Aura with this ID already loaded", None::<String>, request.id);
+            }
+
+            let aura_file = match source.as_str() {
+                "file" => {
+                    let path = match path {
+                        Some(p) => p,
+                        None => return rpc_error(-32602, "path required", None::<String>, request.id),
+                    };
+                    waio_shared::entity::AuraFile::from_path(std::path::Path::new(&path))
+                }
+                "inline" => {
+                    let content = match content {
+                        Some(c) => c,
+                        None => return rpc_error(-32602, "content required", None::<String>, request.id),
+                    };
+                    waio_shared::entity::AuraFile::from_content(&content)
+                }
+                _ => return rpc_error(-32602, "Invalid source", None::<String>, request.id),
+            };
+
+            match aura_file {
+                Ok(aura_file) => {
+                    let aura = aura_file.to_aura();
+                    
+                    match renderer.render_aura_with_state(&aura, wl_state) {
+                        Ok(_) => {
+                            auras.insert(id.clone(), aura);
+                            rpc_success(serde_json::json!({ "status": "ok", "id": id }), request.id)
+                        }
+                        Err(e) => rpc_error(-32000, &e.to_string(), None::<String>, request.id),
+                    }
+                }
+                Err(e) => rpc_error(-32001, &e.to_string(), None::<String>, request.id),
+            }
+        }
+        Ok(DaemonMethod::UnloadAura { id }) => {
+            let mut auras = match auras.lock() {
+                Ok(a) => a,
+                Err(e) => return rpc_error(-32000, &e.to_string(), None::<String>, request.id),
+            };
+
+            if !auras.contains_key(&id) {
+                return rpc_error(-32001, "Aura not found", None::<String>, request.id);
+            }
+
+            match renderer.remove_aura(&id) {
+                Ok(_) => {
+                    auras.remove(&id);
+                    rpc_success(serde_json::json!({ "status": "ok" }), request.id)
+                }
+                Err(e) => rpc_error(-32000, &e.to_string(), None::<String>, request.id),
+            }
+        }
+        Ok(DaemonMethod::ListAuras) => {
+            let auras = match auras.lock() {
+                Ok(a) => a,
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
+            };
+
+            let list: Vec<serde_json::Value> = auras
+                .iter()
+                .map(|(id, aura)| {
+                    serde_json::json!({
+                        "id": id,
+                        "name": aura.name,
+                        "type": format!("{:?}", aura.aura_type)
+                    })
+                })
+                .collect();
+
+            rpc_success(serde_json::json!({ "auras": list }), request.id)
+        }
+        Ok(DaemonMethod::SystemInfo) => {
+            let auras = match auras.lock() {
+                Ok(a) => a,
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
+            };
+
+            rpc_success(serde_json::json!({
+                "version": "0.1.0",
+                "name": "Waio Daemon",
+                "auras_count": auras.len()
+            }), request.id)
+        }
+        Ok(DaemonMethod::SystemShutdown) => {
+            info!("Shutdown requested via IPC");
+            rpc_success(serde_json::json!({ "status": "ok", "message": "Shutting down" }), request.id)
+        }
+        Ok(DaemonMethod::UpdateAura { id, content }) => {
+            let mut auras = match auras.lock() {
+                Ok(a) => a,
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
+            };
+
+            if !auras.contains_key(&id) {
+                return rpc_error(-32001, "Aura not found", None::<String>, request.id);
+            }
+
+            match AuraFile::from_content(&content) {
+                Ok(aura_file) => {
+                    let aura = aura_file.to_aura();
+                    match renderer.render_aura_with_state(&aura, wl_state) {
+                        Ok(_) => {
+                            auras.insert(id.clone(), aura);
+                            rpc_success(serde_json::json!({ "status": "ok", "id": id }), request.id)
+                        }
+                        Err(e) => rpc_error(-32000, &e.to_string(), None::<String>, request.id),
+                    }
+                }
+                Err(e) => rpc_error(-32001, &e.to_string(), None, request.id),
+            }
+        }
+        Err(e) => rpc_error(-32602, &e.to_string(), None, request.id),
     }
 }
 

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::Result;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};

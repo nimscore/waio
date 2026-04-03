@@ -1,0 +1,11 @@
+[package]
+name = "waio-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
+waio-shared = { path = "../shared" }
+anyhow = "1"
+serde_json = { workspace = true }

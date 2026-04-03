@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use waio_shared::entity::Aura;
 
 pub trait Renderer {
@@ -20,6 +22,12 @@ pub enum RenderError {
     RenderFailed(String),
     #[error("Aura not found: {0}")]
     AuraNotFound(String),
+}
+
+impl From<mlua::Error> for RenderError {
+    fn from(e: mlua::Error) -> Self {
+        RenderError::LuaError(e.to_string())
+    }
 }
 
 pub struct RenderUseCase<R: Renderer> {
