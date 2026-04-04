@@ -69,7 +69,7 @@ impl SlintRenderer {
     pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> Self {
         let timer_registry = TimerRegistry::new();
         let lua = mlua::Lua::new();
-        let _ = lua::register_all(&lua, timer_registry.clone());
+        let _ = lua::register_all(&lua);
 
         Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
@@ -105,11 +105,9 @@ impl SlintRenderer {
         );
 
         // 2. Create a dedicated MinimalSoftwareWindow for this aura.
-        //    NewBuffer allocates a fresh buffer each frame, ensuring Slint draws
-        //    the COMPLETE scene (all text, including unchanged characters).
-        //    With ReusedBuffer, only changed characters are redrawn, leaving
-        //    "ghost" artifacts of old characters when using transparent backgrounds.
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        //    ReusedBuffer allows incremental rendering — Slint only redraws dirty regions.
+        //    Combined with pixel restoration, this means only changed pixels are rendered.
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
         window.set_size(PhysicalSize::new(
             aura.config.size.width,
             aura.config.size.height,
@@ -158,10 +156,20 @@ impl SlintRenderer {
         // 7. Run Lua code with command queue bridge.
         if let Some(ref lua_code) = aura.lua_code {
             let lua = self.lua_state.borrow();
+
+            // Register slint bridge first.
             lua::slint_bridge::register_with_queue(
                 &lua,
                 external_id.to_string(),
                 self.command_queue.clone(),
+            )
+            .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
+
+            // Register waio.timer with this aura's ID so timers are tracked.
+            lua::register_timer_for_aura(
+                &lua,
+                self.timer_registry.clone(),
+                external_id.to_string(),
             )
             .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
@@ -316,6 +324,8 @@ impl SlintRenderer {
             let mut render_states = self.render_states.borrow_mut();
             for id in &modified_auras {
                 if let Some(state) = render_states.get_mut(id) {
+                    // Tell Slint the window needs re-rendering.
+                    state.window.request_redraw();
                     state.dirty = true;
                 }
             }
@@ -363,6 +373,10 @@ impl SlintRenderer {
 
     /// Remove an aura and all its resources.
     pub fn remove_aura(&self, aura_id: &str) -> Result<()> {
+        // Stop all timers for this aura — their threads will exit cleanly.
+        self.timer_registry.cancel_all_for_aura(aura_id);
+
+        // Close the Wayland surface.
         {
             let mut surfaces = self.surfaces.borrow_mut();
             if let Some(surface) = surfaces.get_mut(aura_id) {
@@ -371,6 +385,7 @@ impl SlintRenderer {
             surfaces.remove(aura_id);
         }
 
+        // Remove render state.
         {
             let mut render_states = self.render_states.borrow_mut();
             render_states.remove(aura_id);
@@ -462,7 +477,17 @@ impl SlintRenderer {
                     &pixels,
                 );
             })
-            .map_err(|e| WaioError::SlintRender(format!("frame: {}", e)))
+            .map_err(|e| WaioError::SlintRender(format!("frame: {}", e)))?;
+
+        // Clear dirty flag after successful render.
+        {
+            let mut render_states = self.render_states.borrow_mut();
+            if let Some(state) = render_states.get_mut(aura_id) {
+                state.dirty = false;
+            }
+        }
+
+        Ok(())
     }
 
     fn compile_slint(
@@ -503,8 +528,12 @@ impl SlintRenderer {
 
 /// Render a Slint component to an ARGB8888 canvas.
 ///
-/// With RepaintBufferType::NewBuffer, Slint allocates a fresh buffer each frame
-/// and draws the COMPLETE scene. No pixel restoration needed.
+/// Uses RepaintBufferType::ReusedBuffer with pixel restoration:
+/// 1. Save current pixels (previous frame)
+/// 2. Let Slint render — it only updates dirty regions (changed text)
+/// 3. Restore non-dirty pixels from the saved copy
+///
+/// This means only ~200 pixels (changed digits) are re-rendered instead of 76,800.
 fn render_slint_to_canvas_with_persistent_buffer(
     window: &MinimalSoftwareWindow,
     canvas: &mut [u8],
@@ -529,14 +558,21 @@ fn render_slint_to_canvas_with_persistent_buffer(
             pixels.resize(pixel_count, Rgb565Pixel::default());
         }
 
-        // Always request redraw — Slint draws the COMPLETE scene into a fresh buffer.
-        window.request_redraw();
+        // Save the previous frame for restoration.
+        let saved = pixels.clone();
 
-        // NewBuffer gives us a clean buffer every time, so Slint renders all text
-        // including unchanged characters. No ghosting artifacts.
+        // Always render — Slint only updates dirty regions with ReusedBuffer.
         window.draw_if_needed(|renderer: &SoftwareRenderer| {
             renderer.render(&mut *pixels, canvas_w as usize);
         });
+
+        // Restore non-dirty pixels from the saved frame.
+        // Slint zeroes pixels it didn't redraw, so we restore them.
+        for i in 0..pixel_count.min(pixels.len()).min(saved.len()) {
+            if pixels[i].0 == 0 && saved[i].0 != 0 {
+                pixels[i] = saved[i];
+            }
+        }
 
         // Convert Rgb565 → Argb8888 and write to canvas.
         for (i, pixel) in pixels.iter().enumerate() {
