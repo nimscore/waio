@@ -2,9 +2,9 @@
 meta:
   id: clock-bar
   name: Clock Bar
-  version: 1.0.0
+  version: 2.0.0
   author: Waio Team
-  description: Upper panel with clock and date
+  description: Upper panel with clock and date — sub-component rendering
   permissions:
     - timer
     - system_time
@@ -17,47 +17,70 @@ config:
 </yaml>
 
 <slint>
-export component AuraBar inherits Window {
+// Background layer — rendered once, full window size
+export component Background inherits Window {
     width: 1920px;
     height: 40px;
-    background: #1111;
 
-    in property <string> time_text: "00:00:00";
-    in property <string> date_text: "1970-01-01";
-
-    Text {
-        text: parent.time_text;
-        color: #ffff;
-        font-size: 18px;
-        font-weight: 700;
-        x: 10px;
-        y: 10px;
+    // Background fill
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #1a1a1a;
     }
 
-    Text {
-        text: parent.date_text;
-        color: #ffff;
-        font-size: 14px;
-        x: 150px;
-        y: 12px;
-    }
-
+    // Bottom line
     Rectangle {
         width: parent.width;
         height: 1px;
-        background: #f84;
+        background: #ffffff;
         y: 39px;
     }
 }
+
+// Time text layer — rendered when time_text changes
+export component TimeLayer inherits Window {
+    width: 130px;
+    height: 24px;
+    background: transparent;
+    in property <string> time_text: "00:00:00";
+
+    Text {
+        text: parent.time_text;
+        color: #ffffff;
+        font-size: 18px;
+        font-weight: 700;
+    }
+}
+
+// Date text layer — rendered when date_text changes
+export component DateLayer inherits Window {
+    width: 120px;
+    height: 20px;
+    background: transparent;
+    in property <string> date_text: "1970-01-01";
+
+    Text {
+        text: parent.date_text;
+        color: #ffffff;
+        font-size: 14px;
+    }
+}
 </slint>
+
+<layout>
+Background: { x: 0, y: 0, w: 1920, h: 40, dynamic: false }
+TimeLayer: { x: 10, y: 10, w: 130, h: 24 }
+DateLayer: { x: 150, y: 12, w: 120, h: 20 }
+</layout>
 
 <lua>
 waio.timer.interval(1000, function()
     local time = waio.time.now()
     local date = waio.time.format("%Y-%m-%d")
 
-    slint.set_property("time_text", time.str)
-    slint.set_property("date_text", date)
+    slint.set_property("TimeLayer.time_text", time.str)
+    slint.set_property("DateLayer.date_text", date)
 end)
 
 print("Clock Bar Aura loaded!")

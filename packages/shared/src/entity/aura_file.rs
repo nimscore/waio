@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::entity::{Aura, AuraConfig, AuraType, LayerAnchor, Size};
+use crate::entity::{Aura, AuraConfig, AuraLayer, AuraType, LayerAnchor, Size};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuraFile {
@@ -9,6 +9,8 @@ pub struct AuraFile {
     pub config: AuraConfigYaml,
     pub slint_code: String,
     pub lua_code: String,
+    /// Optional layout block for sub-component rendering.
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,15 +75,28 @@ impl AuraFile {
         let lua_code = extract_block(content, "lua")
             .ok_or_else(|| anyhow::anyhow!("<lua> block not found"))?;
 
+        // Optional <layout> block for sub-component rendering.
+        let layout = extract_block(content, "layout");
+
         Ok(Self {
             meta,
             config,
             slint_code,
             lua_code,
+            layout,
         })
     }
 
     pub fn to_aura(&self) -> Aura {
+        // Parse layers from layout block if present.
+        let layers = self
+            .layout
+            .as_ref()
+            .and_then(|l| {
+                parse_layers_yaml(l).ok()
+            })
+            .unwrap_or_default();
+
         Aura {
             id: self.meta.id.clone(),
             name: self.meta.name.clone(),
@@ -96,8 +111,58 @@ impl AuraFile {
                 },
                 exclusive_zone: self.config.exclusive_zone,
             },
+            layers,
         }
     }
+}
+
+/// Parse layer definitions from the <layout> YAML block.
+///
+/// Format:
+/// ```yaml
+/// Background: { x: 0, y: 0 }
+/// TimeLayer: { x: 10, y: 10 }
+/// DateLayer: { x: 150, y: 12 }
+/// ```
+fn parse_layers_yaml(layout: &str) -> anyhow::Result<Vec<AuraLayer>> {
+    let layers_map: serde_yaml::Value = serde_yaml::from_str(layout)?;
+
+    let mut layers = Vec::new();
+    if let serde_yaml::Value::Mapping(map) = layers_map {
+        for (key, value) in map {
+            let name = key.as_str().unwrap_or("").to_string();
+            let mut x = 0u32;
+            let mut y = 0u32;
+            let mut layer_w = 1920u32;
+            let mut layer_h = 40u32;
+            let mut dynamic = true;
+
+            if let serde_yaml::Value::Mapping(props) = value {
+                if let Some(v) = props.get("x") {
+                    x = v.as_u64().unwrap_or(0) as u32;
+                }
+                if let Some(v) = props.get("y") {
+                    y = v.as_u64().unwrap_or(0) as u32;
+                }
+                if let Some(v) = props.get("w") {
+                    layer_w = v.as_u64().unwrap_or(1920) as u32;
+                }
+                if let Some(v) = props.get("h") {
+                    layer_h = v.as_u64().unwrap_or(40) as u32;
+                }
+                if let Some(v) = props.get("dynamic") {
+                    dynamic = v.as_bool().unwrap_or(true);
+                }
+            }
+
+            layers.push(AuraLayer { name, x, y, w: layer_w, h: layer_h, dynamic });
+        }
+    }
+
+    // Sort: non-dynamic (static) layers first so they render as background.
+    layers.sort_by_key(|l| l.dynamic);
+
+    Ok(layers)
 }
 
 fn extract_block(content: &str, tag: &str) -> Option<String> {

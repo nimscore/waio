@@ -9,6 +9,29 @@ pub enum AuraType {
     Overlay,
 }
 
+/// A single renderable layer within an aura.
+/// Each layer is a separate Slint component rendered to its own buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuraLayer {
+    /// Name of the exported Slint component (e.g. "Background", "TimeLayer").
+    pub name: String,
+    /// X position in the final composite buffer.
+    pub x: u32,
+    /// Y position in the final composite buffer.
+    pub y: u32,
+    /// Width of this layer.
+    #[serde(default = "default_layer_size")]
+    pub w: u32,
+    /// Height of this layer.
+    #[serde(default = "default_layer_size")]
+    pub h: u32,
+    /// Whether this layer is static (background) or dynamic (updates on property change).
+    #[serde(default)]
+    pub dynamic: bool,
+}
+
+fn default_layer_size() -> u32 { 1920 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Aura {
     pub id: String,
@@ -17,6 +40,10 @@ pub struct Aura {
     pub slint_code: String,
     pub lua_code: Option<String>,
     pub config: AuraConfig,
+    /// Layer definitions for sub-component rendering.
+    /// If empty, falls back to single-component rendering.
+    #[serde(default)]
+    pub layers: Vec<AuraLayer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +96,7 @@ impl Aura {
             slint_code,
             lua_code: None,
             config: AuraConfig::default(),
+            layers: Vec::new(),
         }
     }
 
@@ -91,6 +119,7 @@ impl Default for Aura {
             slint_code: DEFAULT_BAR_SLINT.to_string(),
             lua_code: None,
             config: AuraConfig::default(),
+            layers: Vec::new(),
         }
     }
 }

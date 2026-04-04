@@ -301,6 +301,50 @@ impl AuraSurface {
 
     // ─── Private helpers ───
 
+    /// Send a pre-composited ARGB8888 canvas to the Wayland surface.
+    /// Used by sub-component compositing mode.
+    pub fn draw_precomposited(&mut self, canvas: &[u8]) -> Result<()> {
+        let (w, h) = match &self.state {
+            SurfaceState::Rendering { current_size, .. } => *current_size,
+            SurfaceState::Configured { configured_size, .. } => *configured_size,
+            _ => return Err(anyhow::anyhow!("Surface not in renderable state")),
+        };
+
+        let stride = w as i32 * 4;
+        let (buffer, slot_canvas) = self.pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?;
+
+        // Copy the pre-composited canvas into the buffer.
+        let copy_len = canvas.len().min(slot_canvas.len());
+        slot_canvas[..copy_len].copy_from_slice(&canvas[..copy_len]);
+
+        if let Some(surface) = self.surface() {
+            surface.damage_buffer(0, 0, w as i32, h as i32);
+            buffer.attach_to(surface)?;
+            surface.commit();
+
+            // Request next frame callback.
+            surface.frame(&self.qh, surface.clone());
+        }
+
+        // Transition to Rendering state if we were in Configured.
+        if matches!(self.state, SurfaceState::Configured { .. }) {
+            if let SurfaceState::Configured { surface, layer_surface, configured_size } =
+                std::mem::replace(&mut self.state, SurfaceState::Closed)
+            {
+                self.state = SurfaceState::Rendering {
+                    surface,
+                    layer_surface,
+                    current_size: configured_size,
+                    dirty: false,
+                };
+            }
+        }
+
+        tracing::debug!("AuraSurface {} precomposited frame sent: {}x{}", self.id, w, h);
+
+        Ok(())
+    }
+
     /// Low-level draw: create buffer → run render_fn → damage → attach → commit.
     fn draw<F>(&mut self, surface: &WlSurface, render_fn: F, (w, h): (u32, u32)) -> Result<()>
     where

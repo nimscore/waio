@@ -1,8 +1,9 @@
+use regex::Regex;
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel, SoftwareRenderer,
 };
 use slint::PhysicalSize;
-use slint_interpreter::{Compiler, ComponentInstance, Value};
+use slint_interpreter::{Compiler, ComponentDefinition, ComponentInstance, Value};
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
@@ -21,36 +22,53 @@ use crate::infrastructure::wayland::{AuraSurface, WlState};
 use crate::usecase::render::Renderer;
 use waio_shared::entity::Aura;
 
-/// Per-aura Slint rendering state.
-///
-/// Each aura gets its own `MinimalSoftwareWindow` and `ComponentInstance`.
-/// This is critical: sharing a single window across multiple auras causes
-/// size conflicts, property clobbering, and render corruption.
-struct AuraRenderState {
-    /// The compiled and instantiated Slint component.
-    component: ComponentInstance,
-    /// Slint's software rendering window — one per aura.
+/// A single renderable layer (sub-window) within an aura.
+/// Each layer is a separate Slint component rendered to its own buffer,
+/// then composited into the final frame buffer.
+struct SubWindow {
+    /// Name of the exported Slint component (e.g. "Background", "TimeLayer").
+    name: String,
+    /// Slint's software rendering window for this layer.
     window: Rc<MinimalSoftwareWindow>,
-    /// Size in physical pixels (from aura config, may be overridden by compositor).
+    /// The instantiated Slint component.
+    component: ComponentInstance,
+    /// Position in the final composite buffer.
+    x: u32,
+    y: u32,
+    /// Size of this layer.
     width: u32,
     height: u32,
-    /// Whether this aura needs redrawing on the next frame.
-    dirty: bool,
-    /// Persistent pixel buffer for Slint rendering.
-    /// Wrapped in Rc for cheap cloning (all clones share the same Vec).
-    pixels: Rc<RefCell<Vec<Rgb565Pixel>>>,
+    /// Pixel buffer for this layer.
+    pixels: Vec<Rgb565Pixel>,
+    /// Whether this layer needs re-rendering.
+    needs_render: bool,
+    /// Whether this is a static layer (rendered once, never updated).
+    is_static: bool,
+}
+
+/// Per-aura Slint rendering state.
+///
+/// If the aura has sub-component layers, `sub_windows` contains one entry per layer.
+/// Otherwise, falls back to single-component mode with `main_window`.
+struct AuraRenderState {
+    /// Sub-windows for per-layer rendering. Empty = single-component mode.
+    sub_windows: Vec<SubWindow>,
+    /// Main window for single-component mode (fallback).
+    main_window: Option<Rc<MinimalSoftwareWindow>>,
+    /// Main component for single-component mode.
+    main_component: Option<ComponentInstance>,
+    /// Pixel buffer for single-component mode.
+    main_pixels: Option<Rc<RefCell<Vec<Rgb565Pixel>>>>,
+    /// Total aura size (from config).
+    width: u32,
+    height: u32,
+    /// Whether this aura needs rendering.
+    needs_render: bool,
 }
 
 /// Central renderer managing all aura Slint components and Wayland surfaces.
-///
-/// Lifecycle:
-/// 1. `load_aura()` — compile Slint, create window + surface, run Lua. Surface enters Pending state.
-/// 2. `on_surface_configured()` — compositor confirmed sizes. Render first frame.
-/// 3. `process_commands()` — apply Lua property updates, mark surfaces dirty.
-/// 4. `redraw_all()` — render all dirty surfaces.
-/// 5. `on_frame_complete()` — frame callback received, render next frame if dirty.
 pub struct SlintRenderer {
-    /// Per-aura Slint render state (component + window).
+    /// Per-aura Slint render state.
     render_states: Rc<RefCell<HashMap<String, AuraRenderState>>>,
     /// Per-aura Wayland surface state.
     surfaces: Rc<RefCell<HashMap<String, AuraSurface>>>,
@@ -84,10 +102,7 @@ impl SlintRenderer {
 
     // ─── Aura lifecycle ───
 
-    /// Load an aura: compile Slint, create Wayland surface (pending), run Lua.
-    ///
-    /// The `external_id` is the ID provided by the caller (CLI), used as the key
-    /// in render_states and surfaces maps. This ensures load/unload use the same key.
+    /// Load an aura: compile Slint, create SubWindows, create Wayland surface, run Lua.
     pub fn load_aura(
         &self,
         aura: &Aura,
@@ -96,33 +111,23 @@ impl SlintRenderer {
     ) -> Result<()> {
         info!("Loading aura: {} (id={})", aura.name, external_id);
 
-        // 1. Compile Slint component from source.
-        let definition = self.compile_slint(&aura.slint_code)?;
-        info!(
-            "Slint component compiled: {}, id={}",
-            definition.name(),
-            external_id
-        );
+        // Parse sub-components from Slint code.
+        let component_names = extract_component_names(&aura.slint_code);
+        let has_layers = !aura.layers.is_empty() && !component_names.is_empty();
 
-        // 2. Create a dedicated MinimalSoftwareWindow for this aura.
-        //    ReusedBuffer allows incremental rendering — Slint only redraws dirty regions.
-        //    Combined with pixel restoration, this means only changed pixels are rendered.
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-        window.set_size(PhysicalSize::new(
-            aura.config.size.width,
-            aura.config.size.height,
-        ));
+        if has_layers {
+            info!(
+                "Loading aura with {} sub-components: {:?}",
+                component_names.len(),
+                component_names
+            );
+            self.load_aura_with_layers(aura, external_id, &component_names)?;
+        } else {
+            info!("Loading aura in single-component mode");
+            self.load_aura_single(aura, external_id)?;
+        }
 
-        // 3. Instantiate the component with this window.
-        let component = definition
-            .create_with_existing_window(&window)
-            .map_err(|e| WaioError::SlintCompilation(format!("create component: {}", e)))?;
-
-        // 4. Pre-allocate the persistent pixel buffer.
-        let pixel_count = (aura.config.size.width * aura.config.size.height) as usize;
-        let pixels = Rc::new(RefCell::new(vec![Rgb565Pixel::default(); pixel_count]));
-
-        // 5. Create the Wayland layer surface (Pending state, initial commit sent).
+        // Create the Wayland layer surface.
         let surface = AuraSurface::new(
             &self.compositor,
             &wl_state.layer_shell,
@@ -133,31 +138,15 @@ impl SlintRenderer {
         )
         .map_err(|e| WaioError::Wayland(anyhow::anyhow!("{}", e)))?;
 
-        // 6. Register both in our maps.
-        {
-            let mut states = self.render_states.borrow_mut();
-            states.insert(
-                external_id.to_string(),
-                AuraRenderState {
-                    component,
-                    window,
-                    width: aura.config.size.width,
-                    height: aura.config.size.height,
-                    dirty: false,
-                    pixels,
-                },
-            );
-        }
         {
             let mut surfaces = self.surfaces.borrow_mut();
             surfaces.insert(external_id.to_string(), surface);
         }
 
-        // 7. Run Lua code with command queue bridge.
+        // Run Lua code.
         if let Some(ref lua_code) = aura.lua_code {
             let lua = self.lua_state.borrow();
 
-            // Register slint bridge first.
             lua::slint_bridge::register_with_queue(
                 &lua,
                 external_id.to_string(),
@@ -165,7 +154,6 @@ impl SlintRenderer {
             )
             .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
-            // Register waio.timer with this aura's ID so timers are tracked.
             lua::register_timer_for_aura(
                 &lua,
                 self.timer_registry.clone(),
@@ -186,22 +174,131 @@ impl SlintRenderer {
         Ok(())
     }
 
+    /// Load aura with sub-component layers.
+    fn load_aura_with_layers(
+        &self,
+        aura: &Aura,
+        external_id: &str,
+        _component_names: &[String],
+    ) -> Result<()> {
+        // Compile the full Slint code ONCE.
+        let compiler = Compiler::default();
+        let result = spin_on::spin_on(
+            compiler.build_from_source(aura.slint_code.clone(), std::path::PathBuf::from("virtual.slint")),
+        );
+
+        for diag in result.diagnostics() {
+            match diag.level() {
+                slint_interpreter::DiagnosticLevel::Error => {
+                    error!("Slint compilation error: {}", diag)
+                }
+                slint_interpreter::DiagnosticLevel::Warning => {
+                    warn!("Slint compilation warning: {}", diag)
+                }
+                _ => info!("Slint compilation info: {}", diag),
+            }
+        }
+
+        let mut sub_windows = Vec::new();
+
+        for layer in &aura.layers {
+            // Get the component definition from the already-compiled result.
+            let comp_def = result
+                .component(&layer.name)
+                .ok_or_else(|| WaioError::SlintCompilation(format!(
+                    "Component '{}' not found", layer.name
+                )))?;
+
+            info!("Using component: {} ({}x{})", layer.name, layer.w, layer.h);
+
+            let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+            window.set_size(PhysicalSize::new(layer.w, layer.h));
+
+            let component = comp_def
+                .create_with_existing_window(&window)
+                .map_err(|e| WaioError::SlintCompilation(format!("{}: {}", layer.name, e)))?;
+
+            sub_windows.push(SubWindow {
+                name: layer.name.clone(),
+                window,
+                component,
+                x: layer.x,
+                y: layer.y,
+                width: layer.w,
+                height: layer.h,
+                pixels: vec![Rgb565Pixel::default(); (layer.w * layer.h) as usize],
+                needs_render: true,
+                is_static: !layer.dynamic,
+            });
+        }
+
+        {
+            let mut states = self.render_states.borrow_mut();
+            states.insert(
+                external_id.to_string(),
+                AuraRenderState {
+                    sub_windows,
+                    main_window: None,
+                    main_component: None,
+                    main_pixels: None,
+                    width: aura.config.size.width,
+                    height: aura.config.size.height,
+                    needs_render: true,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Load aura in single-component mode (fallback).
+    fn load_aura_single(&self, aura: &Aura, external_id: &str) -> Result<()> {
+        let definition = self.compile_slint(&aura.slint_code)?;
+        info!(
+            "Slint component compiled: {}, id={}",
+            definition.name(),
+            external_id
+        );
+
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        window.set_size(PhysicalSize::new(
+            aura.config.size.width,
+            aura.config.size.height,
+        ));
+
+        let component = definition
+            .create_with_existing_window(&window)
+            .map_err(|e| WaioError::SlintCompilation(format!("create component: {}", e)))?;
+
+        let pixel_count = (aura.config.size.width * aura.config.size.height) as usize;
+        let pixels = Rc::new(RefCell::new(vec![Rgb565Pixel::default(); pixel_count]));
+
+        {
+            let mut states = self.render_states.borrow_mut();
+            states.insert(
+                external_id.to_string(),
+                AuraRenderState {
+                    sub_windows: Vec::new(),
+                    main_window: Some(window),
+                    main_component: Some(component),
+                    main_pixels: Some(pixels),
+                    width: aura.config.size.width,
+                    height: aura.config.size.height,
+                    needs_render: true,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
     /// Called when the compositor sends a configure event for a layer surface.
-    ///
-    /// SCTK automatically calls `ack_configure(serial)` BEFORE invoking our handler,
-    /// so we do NOT need to call it manually.
-    ///
-    /// This method:
-    /// 1. Finds the aura by matching the layer surface
-    /// 2. Calls surface.on_configure() to transition Pending → Configured
-    /// 3. If first configure, triggers the first frame render
     pub fn on_surface_configured(
         &self,
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) -> Result<()> {
-        // Find the aura ID by matching the layer surface using PartialEq (compares Wayland object ID).
         let aura_id = {
             let surfaces = self.surfaces.borrow();
             surfaces
@@ -220,7 +317,6 @@ impl SlintRenderer {
 
         info!("Layer surface configured for aura: {}", id);
 
-        // Transition the surface state: Pending → Configured (or update sizes).
         let is_first = {
             let mut surfaces = self.surfaces.borrow_mut();
             if let Some(surface) = surfaces.get_mut(&id) {
@@ -230,7 +326,6 @@ impl SlintRenderer {
             }
         };
 
-        // If this is the first configure, render the initial frame.
         if is_first {
             self.render_first_frame_for_aura(&id)
         } else {
@@ -238,11 +333,8 @@ impl SlintRenderer {
         }
     }
 
-    /// Called when a frame callback is received for a Wayland surface.
-    ///
-    /// If the surface is dirty, renders the next frame and requests another frame callback.
+    /// Called when a frame callback is received.
     pub fn on_frame_complete(&self, surface: &WlSurface) -> Result<()> {
-        // Find the aura ID by matching the wl_surface using PartialEq.
         let aura_id = {
             let surfaces = self.surfaces.borrow();
             surfaces
@@ -259,7 +351,7 @@ impl SlintRenderer {
         self.render_frame_for_aura(&id)
     }
 
-    /// Called when a layer surface is closed by the compositor.
+    /// Called when a layer surface is closed.
     pub fn on_surface_closed(&self, layer: &LayerSurface) {
         let aura_id = {
             let surfaces = self.surfaces.borrow();
@@ -276,11 +368,7 @@ impl SlintRenderer {
     }
 
     /// Process pending property updates from Lua command queue.
-    ///
-    /// Drains all commands, applies property updates to the corresponding Slint components,
-    /// and marks affected surfaces as dirty.
     pub fn process_commands(&self) -> Result<()> {
-        // Drain all pending commands.
         let commands = {
             let mut q = self
                 .command_queue
@@ -293,45 +381,68 @@ impl SlintRenderer {
             return Ok(());
         }
 
-        // Collect which auras were modified.
-        // Silently skip commands for removed auras (Lua timers can't be stopped).
+        // Apply property updates.
+        // Property name format: "LayerName.property" or just "property" (single-component mode).
         let mut modified_auras: Vec<String> = Vec::new();
 
         {
             let render_states = self.render_states.borrow();
             for cmd in &commands {
                 if !render_states.contains_key(&cmd.aura_id) {
-                    continue; // Silently skip stale commands
+                    continue;
                 }
-                if let Some(render_state) = render_states.get(&cmd.aura_id) {
-                    match render_state.component.set_property(
-                        &cmd.property,
-                        Value::String(slint::SharedString::from(cmd.value.clone())),
-                    ) {
-                        Ok(_) => {
-                            modified_auras.push(cmd.aura_id.clone());
+
+                let state = render_states.get(&cmd.aura_id).unwrap();
+
+                // Try to parse "LayerName.property" format.
+                if let Some((layer_name, prop_name)) = cmd.property.split_once('.') {
+                    // Sub-component mode: find the matching SubWindow.
+                    for sw in &state.sub_windows {
+                        if sw.name == layer_name {
+                            match sw.component.set_property(
+                                prop_name,
+                                Value::String(slint::SharedString::from(cmd.value.clone())),
+                            ) {
+                                Ok(_) => modified_auras.push(cmd.aura_id.clone()),
+                                Err(e) => warn!("Failed to set property {}.{}: {}", layer_name, prop_name, e),
+                            }
+                            break;
                         }
-                        Err(e) => {
-                            warn!("Failed to set property {}: {}", cmd.property, e)
+                    }
+                } else {
+                    // Single-component mode.
+                    if let Some(ref component) = state.main_component {
+                        match component.set_property(
+                            &cmd.property,
+                            Value::String(slint::SharedString::from(cmd.value.clone())),
+                        ) {
+                            Ok(_) => modified_auras.push(cmd.aura_id.clone()),
+                            Err(e) => warn!("Failed to set property {}: {}", cmd.property, e),
                         }
                     }
                 }
             }
         }
 
-        // Mark modified auras as dirty.
+        // Mark auras as needing render.
         {
             let mut render_states = self.render_states.borrow_mut();
-            for id in &modified_auras {
-                if let Some(state) = render_states.get_mut(id) {
-                    // Tell Slint the window needs re-rendering.
-                    state.window.request_redraw();
-                    state.dirty = true;
+            for cmd in &commands {
+                if let Some(state) = render_states.get_mut(&cmd.aura_id) {
+                    state.needs_render = true;
+                    // Mark matching sub-windows.
+                    if let Some((layer_name, _)) = cmd.property.split_once('.') {
+                        for sw in &mut state.sub_windows {
+                            if sw.name == layer_name {
+                                sw.needs_render = true;
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Mark surfaces as dirty too (for the surface state machine).
+        // Mark Wayland surfaces as dirty.
         {
             let mut surfaces = self.surfaces.borrow_mut();
             for id in &modified_auras {
@@ -345,17 +456,14 @@ impl SlintRenderer {
     }
 
     /// Redraw all dirty surfaces.
-    ///
-    /// Iterates through all aura surfaces and renders those marked as dirty.
     pub fn redraw_all(&self) -> Result<()> {
-        // Collect IDs of dirty, rendering auras first to avoid borrow conflicts.
         let dirty_ids = {
             let render_states = self.render_states.borrow();
             let surfaces = self.surfaces.borrow();
             render_states
                 .keys()
                 .filter(|id| {
-                    render_states.get(*id).is_some_and(|s| s.dirty)
+                    render_states.get(*id).is_some_and(|s| s.needs_render)
                         && surfaces.get(*id).is_some_and(|s| s.is_rendering())
                 })
                 .cloned()
@@ -373,10 +481,8 @@ impl SlintRenderer {
 
     /// Remove an aura and all its resources.
     pub fn remove_aura(&self, aura_id: &str) -> Result<()> {
-        // Stop all timers for this aura — their threads will exit cleanly.
         self.timer_registry.cancel_all_for_aura(aura_id);
 
-        // Close the Wayland surface.
         {
             let mut surfaces = self.surfaces.borrow_mut();
             if let Some(surface) = surfaces.get_mut(aura_id) {
@@ -385,7 +491,6 @@ impl SlintRenderer {
             surfaces.remove(aura_id);
         }
 
-        // Remove render state.
         {
             let mut render_states = self.render_states.borrow_mut();
             render_states.remove(aura_id);
@@ -397,97 +502,154 @@ impl SlintRenderer {
 
     // ─── Private helpers ───
 
-    /// Render the first frame for an aura (triggered after configure).
+    /// Render the first frame for an aura.
     fn render_first_frame_for_aura(&self, aura_id: &str) -> Result<()> {
-        let (window, width, height, pixels) = {
-            let render_states = self.render_states.borrow();
-            let render_state = render_states
-                .get(aura_id)
-                .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
-
-            (
-                render_state.window.clone(),
-                render_state.width,
-                render_state.height,
-                render_state.pixels.clone(),
-            )
-        };
-
-        let mut surfaces = self.surfaces.borrow_mut();
-        let surface = surfaces
-            .get_mut(aura_id)
-            .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
-
-        surface
-            .render_first_frame(|canvas, canvas_w, canvas_h| {
-                render_slint_to_canvas_with_persistent_buffer(
-                    &window,
-                    canvas,
-                    canvas_w,
-                    canvas_h,
-                    width,
-                    height,
-                    &pixels,
-                );
-            })
-            .map_err(|e| WaioError::SlintRender(format!("first frame: {}", e)))
+        self.render_aura_to_canvas(aura_id, true)
     }
 
     /// Render a subsequent frame for an aura.
     fn render_frame_for_aura(&self, aura_id: &str) -> Result<()> {
-        // Check if dirty first.
+        let needs_render = {
+            let render_states = self.render_states.borrow();
+            render_states.get(aura_id).is_some_and(|s| s.needs_render)
+        };
+
+        if !needs_render {
+            return Ok(());
+        }
+
+        self.render_aura_to_canvas(aura_id, false)
+    }
+
+    /// Render an aura to the Wayland canvas.
+    fn render_aura_to_canvas(&self, aura_id: &str, is_first_frame: bool) -> Result<()> {
         {
             let render_states = self.render_states.borrow();
-            let Some(render_state) = render_states.get(aura_id) else {
-                return Err(WaioError::AuraNotFound(aura_id.to_string()));
-            };
-            if !render_state.dirty {
-                return Ok(());
+            let state = render_states.get(aura_id).ok_or_else(|| {
+                WaioError::AuraNotFound(aura_id.to_string())
+            })?;
+
+            if !state.sub_windows.is_empty() {
+                // Sub-component mode: render each layer, composite, send to Wayland.
+                self.render_composite_and_send(aura_id, &state, is_first_frame)?;
+            } else if let (Some(window), Some(component), Some(pixels)) =
+                (&state.main_window, &state.main_component, &state.main_pixels)
+            {
+                // Single-component mode.
+                render_single_to_canvas(window, component, pixels, state.width, state.height)?;
             }
         }
 
-        let (window, width, height, pixels) = {
-            let render_states = self.render_states.borrow();
-            let render_state = render_states
-                .get(aura_id)
-                .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
-
-            (
-                render_state.window.clone(),
-                render_state.width,
-                render_state.height,
-                render_state.pixels.clone(),
-            )
-        };
-
-        let mut surfaces = self.surfaces.borrow_mut();
-        let surface = surfaces
-            .get_mut(aura_id)
-            .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
-
-        surface
-            .render_frame(|canvas, canvas_w, canvas_h| {
-                render_slint_to_canvas_with_persistent_buffer(
-                    &window,
-                    canvas,
-                    canvas_w,
-                    canvas_h,
-                    width,
-                    height,
-                    &pixels,
-                );
-            })
-            .map_err(|e| WaioError::SlintRender(format!("frame: {}", e)))?;
-
-        // Clear dirty flag after successful render.
+        // Clear needs_render flag.
         {
             let mut render_states = self.render_states.borrow_mut();
             if let Some(state) = render_states.get_mut(aura_id) {
-                state.dirty = false;
+                state.needs_render = false;
             }
         }
 
         Ok(())
+    }
+
+    /// Render each sub-window layer, composite into a single buffer, and send to Wayland.
+    fn render_composite_and_send(
+        &self,
+        aura_id: &str,
+        state: &AuraRenderState,
+        _is_first_frame: bool,
+    ) -> Result<()> {
+        let aura_w = state.width as usize;
+        let aura_h = state.height as usize;
+        let mut final_pixels: Vec<Rgb565Pixel> = vec![Rgb565Pixel::default(); aura_w * aura_h];
+
+        for sw in &state.sub_windows {
+            // Render this sub-window.
+            sw.window.request_redraw();
+            let mut pixels = sw.pixels.clone();
+            sw.window.draw_if_needed(|renderer: &SoftwareRenderer| {
+                renderer.render(&mut pixels, sw.width as usize);
+            });
+
+            // Blit into final buffer at the layer's position.
+            blit_layer(
+                &mut final_pixels,
+                &pixels,
+                sw.x as usize,
+                sw.y as usize,
+                sw.width as usize,
+                sw.height as usize,
+                aura_w,
+            );
+        }
+
+        // Convert RGB565 → ARGB8888.
+        let mut canvas: Vec<u8> = vec![0; aura_w * aura_h * 4];
+        for (i, pixel) in final_pixels.iter().enumerate() {
+            let r = ((pixel.0 >> 11) & 0x1F) as u32;
+            let g = ((pixel.0 >> 5) & 0x3F) as u32;
+            let b = (pixel.0 & 0x1F) as u32;
+            let idx = i * 4;
+            if idx + 3 < canvas.len() {
+                canvas[idx + 0] = ((b << 3) | (b >> 2)) as u8; // B
+                canvas[idx + 1] = ((g << 2) | (g >> 4)) as u8; // G
+                canvas[idx + 2] = ((r << 3) | (r >> 2)) as u8; // R
+                canvas[idx + 3] = 0xFF; // A
+            }
+        }
+
+        // Send the composited canvas to the Wayland surface.
+        let mut surfaces = self.surfaces.borrow_mut();
+        if let Some(surface) = surfaces.get_mut(aura_id) {
+            surface.draw_precomposited(&canvas)
+                .map_err(|e| WaioError::SlintRender(format!("draw_precomposited: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Send a pixel buffer to the Wayland surface.
+    fn send_to_wayland(
+        &self,
+        _pixels: &[Rgb565Pixel],
+        _width: u32,
+        _height: u32,
+    ) -> Result<()> {
+        // Deprecated — use render_composite_and_send instead.
+        Ok(())
+    }
+
+    /// Compile a single component from the Slint source code.
+    fn compile_single_component(
+        &self,
+        code: &str,
+        component_name: &str,
+    ) -> Result<ComponentDefinition> {
+        let compiler = Compiler::default();
+        let result = spin_on::spin_on(
+            compiler.build_from_source(code.to_string(), std::path::PathBuf::from("virtual.slint")),
+        );
+
+        for diag in result.diagnostics() {
+            match diag.level() {
+                slint_interpreter::DiagnosticLevel::Error => {
+                    error!("Slint compilation error: {}", diag)
+                }
+                slint_interpreter::DiagnosticLevel::Warning => {
+                    warn!("Slint compilation warning: {}", diag)
+                }
+                _ => info!("Slint compilation info: {}", diag),
+            }
+        }
+
+        let definition = result
+            .component(component_name)
+            .ok_or_else(|| WaioError::SlintCompilation(format!(
+                "Component '{}' not found. Available: {:?}",
+                component_name,
+                result.components().map(|c| c.name().to_string()).collect::<Vec<_>>()
+            )))?;
+
+        Ok(definition)
     }
 
     fn compile_slint(
@@ -526,69 +688,63 @@ impl SlintRenderer {
     }
 }
 
-/// Render a Slint component to an ARGB8888 canvas.
-///
-/// Uses RepaintBufferType::ReusedBuffer with pixel restoration:
-/// 1. Save current pixels (previous frame)
-/// 2. Let Slint render — it only updates dirty regions (changed text)
-/// 3. Restore non-dirty pixels from the saved copy
-///
-/// This means only ~200 pixels (changed digits) are re-rendered instead of 76,800.
-fn render_slint_to_canvas_with_persistent_buffer(
+/// Render a single-component aura to the canvas.
+fn render_single_to_canvas(
     window: &MinimalSoftwareWindow,
-    canvas: &mut [u8],
-    canvas_w: u32,
-    canvas_h: u32,
-    _src_w: u32,
-    _src_h: u32,
-    persistent_pixels: &Rc<RefCell<Vec<Rgb565Pixel>>>,
+    _component: &ComponentInstance,
+    pixels: &Rc<RefCell<Vec<Rgb565Pixel>>>,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let mut px = pixels.borrow_mut();
+    let pixel_count = (width * height) as usize;
+
+    if px.len() != pixel_count {
+        px.resize(pixel_count, Rgb565Pixel::default());
+    }
+
+    window.request_redraw();
+    window.draw_if_needed(|renderer: &SoftwareRenderer| {
+        renderer.render(&mut *px, width as usize);
+    });
+
+    // Note: conversion to ARGB8888 and sending to Wayland happens in surface.draw()
+    // This function only updates the pixel buffer.
+
+    Ok(())
+}
+
+/// Blit a layer into the final composite buffer.
+/// Only copies non-black pixels (treats black as transparent).
+fn blit_layer(
+    final_buffer: &mut [Rgb565Pixel],
+    layer_pixels: &[Rgb565Pixel],
+    dst_x: usize,
+    dst_y: usize,
+    layer_w: usize,
+    layer_h: usize,
+    final_stride: usize,
 ) {
-    let pixel_count = (canvas_w * canvas_h) as usize;
-
-    {
-        let mut pixels = persistent_pixels.borrow_mut();
-
-        // Resize buffer if needed.
-        if pixels.len() != pixel_count {
-            tracing::warn!(
-                "Pixel buffer resized: {} -> {} (possible resize event)",
-                pixels.len(),
-                pixel_count
-            );
-            pixels.resize(pixel_count, Rgb565Pixel::default());
-        }
-
-        // Save the previous frame for restoration.
-        let saved = pixels.clone();
-
-        // Always render — Slint only updates dirty regions with ReusedBuffer.
-        window.draw_if_needed(|renderer: &SoftwareRenderer| {
-            renderer.render(&mut *pixels, canvas_w as usize);
-        });
-
-        // Restore non-dirty pixels from the saved frame.
-        // Slint zeroes pixels it didn't redraw, so we restore them.
-        for i in 0..pixel_count.min(pixels.len()).min(saved.len()) {
-            if pixels[i].0 == 0 && saved[i].0 != 0 {
-                pixels[i] = saved[i];
-            }
-        }
-
-        // Convert Rgb565 → Argb8888 and write to canvas.
-        for (i, pixel) in pixels.iter().enumerate() {
-            let r = ((pixel.0 >> 11) & 0x1F) as u32;
-            let g = ((pixel.0 >> 5) & 0x3F) as u32;
-            let b = (pixel.0 & 0x1F) as u32;
-
-            let idx = i * 4;
-            if idx + 3 < canvas.len() {
-                canvas[idx + 0] = ((b << 3) | (b >> 2)) as u8; // B
-                canvas[idx + 1] = ((g << 2) | (g >> 4)) as u8; // G
-                canvas[idx + 2] = ((r << 3) | (r >> 2)) as u8; // R
-                canvas[idx + 3] = 0xFF; // A
+    for y in 0..layer_h {
+        for x in 0..layer_w {
+            let src_idx = y * layer_w + x;
+            let dst_idx = (dst_y + y) * final_stride + (dst_x + x);
+            if dst_idx < final_buffer.len()
+                && src_idx < layer_pixels.len()
+                && layer_pixels[src_idx].0 != 0  // Skip black (transparent) pixels
+            {
+                final_buffer[dst_idx] = layer_pixels[src_idx];
             }
         }
     }
+}
+
+/// Extract all `export component` names from Slint source code.
+fn extract_component_names(code: &str) -> Vec<String> {
+    let re = Regex::new(r"export\s+component\s+(\w+)").unwrap();
+    re.captures_iter(code)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect()
 }
 
 impl crate::usecase::render::Renderer for SlintRenderer {
@@ -612,10 +768,8 @@ impl crate::usecase::render::Renderer for SlintRenderer {
     }
 
     fn shutdown(&self) -> Result<()> {
-        // Stop all timer threads.
         self.timer_registry.cancel_all();
 
-        // Close all surfaces.
         let mut surfaces = self.surfaces.borrow_mut();
         for (_, surface) in surfaces.iter_mut() {
             surface.close();
