@@ -45,7 +45,7 @@ export component AuraBar inherits Window {
     Rectangle {
         width: parent.width;
         height: 1px;
-        background: #ffff;
+        background: #f84;
         y: 39px;
     }
 }

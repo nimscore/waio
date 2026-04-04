@@ -21,6 +21,13 @@ enum Commands {
         /// Path to the .wa file
         path: PathBuf,
     },
+    /// Update a loaded Aura from a .wa file
+    Update {
+        /// ID of the loaded Aura
+        id: String,
+        /// Path to the new .wa file
+        path: PathBuf,
+    },
     /// Unload an Aura by ID
     Unload {
         /// ID of the Aura to unload
@@ -47,6 +54,15 @@ async fn main() {
                 content: None,
                 id: path.file_stem().unwrap().to_string_lossy().to_string(),
             };
+            client.send(method).await
+        }
+        Commands::Update { id, path } => {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| {
+                    eprintln!("\x1b[31mError\x1b[0m: Failed to read {}: {}", path.display(), e);
+                    std::process::exit(1);
+                });
+            let method = DaemonMethod::UpdateAura { id, content };
             client.send(method).await
         }
         Commands::Unload { id } => {

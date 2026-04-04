@@ -224,7 +224,7 @@ fn handle_request(
 
                     // Key change: load_aura creates the surface (pending state) and runs Lua.
                     // The first render happens later when the compositor sends configure.
-                    match renderer.load_aura(&aura, wl_state) {
+                    match renderer.load_aura(&aura, &id, wl_state) {
                         Ok(_) => {
                             auras.insert(id.clone(), aura);
                             rpc_success(
@@ -326,7 +326,7 @@ fn handle_request(
                 Ok(aura_file) => {
                     let aura = aura_file.to_aura();
                     let _ = renderer.remove_aura(&id);
-                    match renderer.load_aura(&aura, wl_state) {
+                    match renderer.load_aura(&aura, &id, wl_state) {
                         Ok(_) => {
                             auras.insert(id.clone(), aura);
                             rpc_success(

@@ -79,17 +79,22 @@ impl SlintRenderer {
 
     /// Load an aura: compile Slint, create Wayland surface (pending), run Lua.
     ///
-    /// The Wayland surface enters `Pending` state and will NOT be drawn until
-    /// the compositor sends a `configure` event, triggering `on_surface_configured`.
-    pub fn load_aura(&self, aura: &Aura, wl_state: &mut WlState) -> Result<(), RenderError> {
-        info!("Loading aura: {} ({})", aura.name, aura.id);
+    /// The `external_id` is the ID provided by the caller (CLI), used as the key
+    /// in render_states and surfaces maps. This ensures load/unload use the same key.
+    pub fn load_aura(
+        &self,
+        aura: &Aura,
+        external_id: &str,
+        wl_state: &mut WlState,
+    ) -> Result<(), RenderError> {
+        info!("Loading aura: {} (id={})", aura.name, external_id);
 
         // 1. Compile Slint component from source.
         let definition = self.compile_slint(&aura.slint_code)?;
         info!(
-            "Slint component compiled: {}, aura={}",
+            "Slint component compiled: {}, id={}",
             definition.name(),
-            aura.id
+            external_id
         );
 
         // 2. Create a dedicated MinimalSoftwareWindow for this aura.
@@ -118,16 +123,16 @@ impl SlintRenderer {
             &wl_state.layer_shell,
             &wl_state.shm,
             &self.qh,
-            aura.id.clone(),
+            external_id.to_string(),
             &aura.config,
         )
         .map_err(|e| RenderError::WaylandError(e.to_string()))?;
 
-        // 5. Register both in our maps.
+        // 6. Register both in our maps.
         {
             let mut states = self.render_states.borrow_mut();
             states.insert(
-                aura.id.clone(),
+                external_id.to_string(),
                 AuraRenderState {
                     component,
                     window,
@@ -140,15 +145,15 @@ impl SlintRenderer {
         }
         {
             let mut surfaces = self.surfaces.borrow_mut();
-            surfaces.insert(aura.id.clone(), surface);
+            surfaces.insert(external_id.to_string(), surface);
         }
 
-        // 6. Run Lua code with command queue bridge.
+        // 7. Run Lua code with command queue bridge.
         if let Some(ref lua_code) = aura.lua_code {
             let lua = self.lua_state.borrow();
             lua::slint_bridge::register_with_queue(
                 &lua,
-                aura.id.clone(),
+                external_id.to_string(),
                 self.command_queue.clone(),
             )
             .map_err(|e| RenderError::LuaError(e.to_string()))?;
@@ -274,16 +279,15 @@ impl SlintRenderer {
         }
 
         // Collect which auras were modified.
+        // Silently skip commands for removed auras (Lua timers can't be stopped).
         let mut modified_auras: Vec<String> = Vec::new();
 
         {
             let render_states = self.render_states.borrow();
             for cmd in &commands {
-                info!(
-                    "Property update: {}.{} = {}",
-                    cmd.aura_id, cmd.property, cmd.value
-                );
-
+                if !render_states.contains_key(&cmd.aura_id) {
+                    continue; // Silently skip stale commands
+                }
                 if let Some(render_state) = render_states.get(&cmd.aura_id) {
                     match render_state.component.set_property(
                         &cmd.property,
@@ -296,8 +300,6 @@ impl SlintRenderer {
                             warn!("Failed to set property {}: {}", cmd.property, e)
                         }
                     }
-                } else {
-                    warn!("Command for unknown aura: {}", cmd.aura_id);
                 }
             }
         }
