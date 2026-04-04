@@ -456,6 +456,11 @@ impl SlintRenderer {
         Ok(())
     }
 
+    /// Process timer fire events — calls Lua callbacks in the main thread (safe).
+    pub fn process_timer_fires(&self) {
+        self.timer_registry.process_fires();
+    }
+
     /// Redraw all dirty surfaces.
     pub fn redraw_all(&self) -> Result<()> {
         let dirty_ids = {

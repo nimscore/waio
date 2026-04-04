@@ -134,6 +134,8 @@ pub fn run() -> Result<()> {
         if let Err(e) = renderer_for_ipc.process_commands() {
             tracing::warn!("Command processing error: {}", e);
         }
+        // Process timer fires — calls Lua callbacks in the main thread.
+        renderer_for_ipc.process_timer_fires();
         if let Err(e) = renderer_for_ipc.redraw_all() {
             tracing::warn!("Redraw error: {}", e);
         }
