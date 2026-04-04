@@ -51,17 +51,11 @@ impl AuraFile {
     }
 
     pub fn from_content(content: &str) -> anyhow::Result<Self> {
-        // Extract YAML part - from after first "---" to before "<slint>"
-        let yaml_part = content
-            .split("---")
-            .nth(1)
-            .ok_or_else(|| anyhow::anyhow!("Invalid aura file: no --- delimiter"))?
-            .split("<slint>")
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Invalid aura file: no <slint> block"))?
-            .trim();
+        // Extract YAML from <yaml>...</yaml> block
+        let yaml_part = extract_block(content, "yaml")
+            .ok_or_else(|| anyhow::anyhow!("<yaml> block not found"))?;
 
-        let yaml: serde_yaml::Value = serde_yaml::from_str(yaml_part)?;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_part)?;
 
         let meta = yaml
             .get("meta")
