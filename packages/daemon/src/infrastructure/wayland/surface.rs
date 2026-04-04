@@ -1,6 +1,7 @@
 use anyhow::Result;
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::reexports::client::protocol::wl_shm;
+use smithay_client_toolkit::reexports::client::protocol::wl_output::WlOutput;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -70,14 +71,15 @@ impl AuraSurface {
         qh: &QueueHandle<WlState>,
         id: String,
         config: &AuraConfig,
+        output: Option<&WlOutput>,
     ) -> Result<Self> {
         tracing::info!(
-            "Creating AuraSurface: id={}, requested={}x{}, anchor={:?}, exclusive_zone={}",
+            "Creating AuraSurface: id={}, requested={}x{}, anchor={:?}, output={:?}",
             id,
             config.size.width,
             config.size.height,
             config.anchor,
-            config.exclusive_zone
+            output.is_some()
         );
 
         let surface = compositor.create_surface(qh);
@@ -87,7 +89,7 @@ impl AuraSurface {
             surface.clone(),
             Layer::Top,
             Some("waio-aura"),
-            None, // output — compositor will auto-select
+            output,
         );
 
         let anchor = Self::anchor_to_bits(&config.anchor);

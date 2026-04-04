@@ -13,6 +13,7 @@ config:
   anchor: top
   width: 1920
   height: 40
+  output: "eDP-1"
   exclusive_zone: 40
 </yaml>
 

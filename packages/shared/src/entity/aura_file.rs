@@ -110,6 +110,7 @@ impl AuraFile {
                     height: self.config.height,
                 },
                 exclusive_zone: self.config.exclusive_zone,
+                output: None,
             },
             layers,
         }

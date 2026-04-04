@@ -51,6 +51,9 @@ pub struct AuraConfig {
     pub anchor: LayerAnchor,
     pub size: Size,
     pub exclusive_zone: i32,
+    /// Optional output (monitor) name to bind to. If None, compositor chooses.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +136,7 @@ impl Default for AuraConfig {
                 height: 30,
             },
             exclusive_zone: 30,
+            output: None,
         }
     }
 }

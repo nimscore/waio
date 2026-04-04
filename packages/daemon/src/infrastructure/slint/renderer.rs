@@ -136,6 +136,7 @@ impl SlintRenderer {
             &self.qh,
             external_id.to_string(),
             &aura.config,
+            aura.config.output.as_deref().and_then(|name| wl_state.get_output(Some(name))),
         )
         .map_err(|e| WaioError::Wayland(anyhow::anyhow!("{}", e)))?;
 
