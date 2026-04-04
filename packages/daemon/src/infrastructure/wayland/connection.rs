@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -19,6 +20,51 @@ use tracing::{debug, info};
 
 use crate::infrastructure::slint::SlintRenderer;
 
+/// Track available outputs for multi-monitor support.
+pub struct OutputTracker {
+    /// Map of output name → WlOutput.
+    outputs: HashMap<String, WlOutput>,
+    /// Default output (first connected).
+    default_output: Option<WlOutput>,
+}
+
+impl OutputTracker {
+    pub fn new() -> Self {
+        Self {
+            outputs: HashMap::new(),
+            default_output: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_output(&self, name: Option<&str>) -> Option<&WlOutput> {
+        if let Some(name) = name {
+            self.outputs.get(name)
+        } else {
+            self.default_output.as_ref()
+        }
+    }
+
+    pub fn add_output(&mut self, name: String, output: WlOutput) {
+        if self.default_output.is_none() {
+            self.default_output = Some(output.clone());
+        }
+        self.outputs.insert(name, output);
+    }
+
+    pub fn remove_output(&mut self, name: &str) {
+        self.outputs.remove(name);
+        if self.default_output.is_some()
+            && self
+                .outputs
+                .values()
+                .all(|o| o != self.default_output.as_ref().unwrap())
+        {
+            self.default_output = self.outputs.values().next().cloned();
+        }
+    }
+}
+
 pub struct WlState {
     pub registry_state: RegistryState,
     pub output_state: OutputState,
@@ -27,6 +73,16 @@ pub struct WlState {
     pub shm: Shm,
     /// Optional reference to the renderer. Set after renderer is created.
     pub renderer: Option<Rc<SlintRenderer>>,
+    /// Track available outputs for multi-monitor support.
+    output_tracker: OutputTracker,
+}
+
+impl WlState {
+    /// Get an output by name, or the default output if name is None.
+    #[allow(dead_code)]
+    pub fn get_output(&self, name: Option<&str>) -> Option<&WlOutput> {
+        self.output_tracker.get_output(name)
+    }
 }
 
 pub struct WaylandConnection {
@@ -53,6 +109,7 @@ impl WaylandConnection {
             layer_shell,
             shm,
             renderer: None,
+            output_tracker: OutputTracker::new(),
         };
 
         info!("Connected to Wayland");
@@ -122,11 +179,27 @@ impl OutputHandler for WlState {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
+    fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, output: WlOutput) {
+        // Try to get output info for the name.
+        let name = self
+            .output_state
+            .info(&output)
+            .and_then(|info| info.name.clone())
+            .unwrap_or_else(|| format!("output-{}", self.output_tracker.outputs.len()));
+
+        info!("New output connected: {}", name);
+        self.output_tracker.add_output(name, output);
+    }
 
     fn update_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
 
-    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {
+    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, output: WlOutput) {
+        if let Some(info) = self.output_state.info(&output) {
+            if let Some(name) = &info.name {
+                info!("Output disconnected: {}", name);
+                self.output_tracker.remove_output(name);
+            }
+        }
     }
 }
 

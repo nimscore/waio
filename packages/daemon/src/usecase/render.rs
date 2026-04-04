@@ -1,38 +1,25 @@
 #![allow(dead_code)]
 
+use crate::error::{Result, WaioError};
 use waio_shared::entity::Aura;
 
 pub trait Renderer {
-    fn init(&self) -> Result<(), RenderError>;
-    fn render_aura(&self, aura: &Aura) -> Result<(), RenderError>;
-    fn remove_aura(&self, aura_id: &str) -> Result<(), RenderError>;
-    fn update_aura(&self, aura_id: &str, slint_code: &str) -> Result<(), RenderError>;
-    fn shutdown(&self) -> Result<(), RenderError>;
+    fn init(&self) -> Result<()>;
+    fn render_aura(&self, aura: &Aura) -> Result<()>;
+    fn remove_aura(&self, aura_id: &str) -> Result<()>;
+    fn update_aura(&self, aura_id: &str, slint_code: &str) -> Result<()>;
+    fn shutdown(&self) -> Result<()>;
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RenderError {
-    #[error("Wayland error: {0}")]
-    WaylandError(String),
-    #[error("Slint compilation failed: {0}")]
-    SlintCompilationFailed(String),
-    #[error("Lua error: {0}")]
-    LuaError(String),
-    #[error("Rendering failed: {0}")]
-    RenderFailed(String),
-    #[error("Aura not found: {0}")]
-    AuraNotFound(String),
-}
-
-impl From<mlua::Error> for RenderError {
-    fn from(e: mlua::Error) -> Self {
-        RenderError::LuaError(e.to_string())
+impl From<String> for WaioError {
+    fn from(e: String) -> Self {
+        WaioError::SlintRender(e)
     }
 }
 
-impl From<String> for RenderError {
-    fn from(e: String) -> Self {
-        RenderError::RenderFailed(e)
+impl From<&str> for WaioError {
+    fn from(e: &str) -> Self {
+        WaioError::SlintRender(e.to_string())
     }
 }
 
@@ -45,15 +32,15 @@ impl<R: Renderer> RenderUseCase<R> {
         Self { renderer }
     }
 
-    pub fn init(&self) -> Result<(), RenderError> {
+    pub fn init(&self) -> Result<()> {
         self.renderer.init()
     }
 
-    pub fn render_aura(&self, aura: &Aura) -> Result<(), RenderError> {
+    pub fn render_aura(&self, aura: &Aura) -> Result<()> {
         self.renderer.render_aura(aura)
     }
 
-    pub fn shutdown(&self) -> Result<(), RenderError> {
+    pub fn shutdown(&self) -> Result<()> {
         self.renderer.shutdown()
     }
 }

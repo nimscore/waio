@@ -7,7 +7,10 @@ use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -103,6 +106,9 @@ pub fn run() -> Result<()> {
     info!("Use waio-cli to load auras");
 
     // 6. Main dispatch loop.
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_for_handler = shutdown_flag.clone();
+
     loop {
         // Dispatch Wayland events (configure, frame, closed, etc.).
         match event_loop.dispatch(Duration::from_millis(16), &mut wl_state) {
@@ -116,6 +122,12 @@ pub fn run() -> Result<()> {
                 }
                 break;
             }
+        }
+
+        // Check if shutdown was requested.
+        if shutdown_flag.load(Ordering::Relaxed) {
+            info!("Shutdown flag set, exiting event loop");
+            break;
         }
 
         // Process Lua property updates and redraw dirty surfaces (replaces timer).
@@ -136,6 +148,7 @@ pub fn run() -> Result<()> {
                         auras.clone(),
                         renderer_for_ipc.clone(),
                         &mut wl_state,
+                        shutdown_for_handler.clone(),
                     );
                     debug!("IPC request completed");
                     let _ = response_tx.send(response);
@@ -158,6 +171,7 @@ fn handle_request(
     auras: Arc<Mutex<HashMap<String, Aura>>>,
     renderer: Rc<SlintRenderer>,
     wl_state: &mut crate::infrastructure::wayland::WlState,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> JsonRpcResponse {
     let method: Result<DaemonMethod, _> = serde_json::from_value(request.params.clone());
 
@@ -304,6 +318,7 @@ fn handle_request(
 
         Ok(DaemonMethod::SystemShutdown) => {
             info!("Shutdown requested via IPC");
+            shutdown_flag.store(true, Ordering::Relaxed);
             rpc_success(
                 serde_json::json!({ "status": "ok", "message": "Shutting down" }),
                 request.id,

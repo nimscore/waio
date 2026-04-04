@@ -12,10 +12,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use tracing::{error, info, warn};
 
+use crate::error::{Result, WaioError};
 use crate::infrastructure::lua;
+use crate::infrastructure::lua::timer::TimerRegistry;
 use crate::infrastructure::slint::aura_handle::{new_command_queue, CommandQueue};
 use crate::infrastructure::wayland::{AuraSurface, WlState};
-use crate::usecase::render::RenderError;
+#[allow(unused_imports)]
+use crate::usecase::render::Renderer;
 use waio_shared::entity::Aura;
 
 /// Per-aura Slint rendering state.
@@ -51,6 +54,8 @@ pub struct SlintRenderer {
     render_states: Rc<RefCell<HashMap<String, AuraRenderState>>>,
     /// Per-aura Wayland surface state.
     surfaces: Rc<RefCell<HashMap<String, AuraSurface>>>,
+    /// Cancellable Lua timers.
+    timer_registry: TimerRegistry,
     /// Shared Lua state.
     lua_state: Rc<RefCell<mlua::Lua>>,
     /// Command queue for Lua → Slint property updates.
@@ -62,12 +67,14 @@ pub struct SlintRenderer {
 
 impl SlintRenderer {
     pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> Self {
+        let timer_registry = TimerRegistry::new();
         let lua = mlua::Lua::new();
-        let _ = lua::register_all(&lua);
+        let _ = lua::register_all(&lua, timer_registry.clone());
 
         Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
             surfaces: Rc::new(RefCell::new(HashMap::new())),
+            timer_registry,
             lua_state: Rc::new(RefCell::new(lua)),
             command_queue: new_command_queue(),
             compositor,
@@ -86,7 +93,7 @@ impl SlintRenderer {
         aura: &Aura,
         external_id: &str,
         wl_state: &mut WlState,
-    ) -> Result<(), RenderError> {
+    ) -> Result<()> {
         info!("Loading aura: {} (id={})", aura.name, external_id);
 
         // 1. Compile Slint component from source.
@@ -111,7 +118,7 @@ impl SlintRenderer {
         // 3. Instantiate the component with this window.
         let component = definition
             .create_with_existing_window(&window)
-            .map_err(|e| RenderError::SlintCompilationFailed(format!("create component: {}", e)))?;
+            .map_err(|e| WaioError::SlintCompilation(format!("create component: {}", e)))?;
 
         // 4. Pre-allocate the persistent pixel buffer.
         let pixel_count = (aura.config.size.width * aura.config.size.height) as usize;
@@ -126,7 +133,7 @@ impl SlintRenderer {
             external_id.to_string(),
             &aura.config,
         )
-        .map_err(|e| RenderError::WaylandError(e.to_string()))?;
+        .map_err(|e| WaioError::Wayland(anyhow::anyhow!("{}", e)))?;
 
         // 6. Register both in our maps.
         {
@@ -156,7 +163,7 @@ impl SlintRenderer {
                 external_id.to_string(),
                 self.command_queue.clone(),
             )
-            .map_err(|e| RenderError::LuaError(e.to_string()))?;
+            .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
             match lua.load(lua_code).exec() {
                 Ok(_) => info!("Lua code executed for aura: {}", aura.id),
@@ -185,7 +192,7 @@ impl SlintRenderer {
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
-    ) -> Result<(), RenderError> {
+    ) -> Result<()> {
         // Find the aura ID by matching the layer surface using PartialEq (compares Wayland object ID).
         let aura_id = {
             let surfaces = self.surfaces.borrow();
@@ -211,7 +218,7 @@ impl SlintRenderer {
             if let Some(surface) = surfaces.get_mut(&id) {
                 surface.on_configure(configure)
             } else {
-                return Err(RenderError::AuraNotFound(id));
+                return Err(WaioError::AuraNotFound(id));
             }
         };
 
@@ -226,7 +233,7 @@ impl SlintRenderer {
     /// Called when a frame callback is received for a Wayland surface.
     ///
     /// If the surface is dirty, renders the next frame and requests another frame callback.
-    pub fn on_frame_complete(&self, surface: &WlSurface) -> Result<(), RenderError> {
+    pub fn on_frame_complete(&self, surface: &WlSurface) -> Result<()> {
         // Find the aura ID by matching the wl_surface using PartialEq.
         let aura_id = {
             let surfaces = self.surfaces.borrow();
@@ -264,13 +271,13 @@ impl SlintRenderer {
     ///
     /// Drains all commands, applies property updates to the corresponding Slint components,
     /// and marks affected surfaces as dirty.
-    pub fn process_commands(&self) -> Result<(), RenderError> {
+    pub fn process_commands(&self) -> Result<()> {
         // Drain all pending commands.
         let commands = {
             let mut q = self
                 .command_queue
                 .lock()
-                .map_err(|e| RenderError::RenderFailed(format!("queue lock: {}", e)))?;
+                .map_err(|e| WaioError::SlintRender(format!("queue lock: {}", e)))?;
             std::mem::take(&mut *q)
         };
 
@@ -330,7 +337,7 @@ impl SlintRenderer {
     /// Redraw all dirty surfaces.
     ///
     /// Iterates through all aura surfaces and renders those marked as dirty.
-    pub fn redraw_all(&self) -> Result<(), RenderError> {
+    pub fn redraw_all(&self) -> Result<()> {
         // Collect IDs of dirty, rendering auras first to avoid borrow conflicts.
         let dirty_ids = {
             let render_states = self.render_states.borrow();
@@ -355,7 +362,7 @@ impl SlintRenderer {
     }
 
     /// Remove an aura and all its resources.
-    pub fn remove_aura(&self, aura_id: &str) -> Result<(), RenderError> {
+    pub fn remove_aura(&self, aura_id: &str) -> Result<()> {
         {
             let mut surfaces = self.surfaces.borrow_mut();
             if let Some(surface) = surfaces.get_mut(aura_id) {
@@ -376,12 +383,12 @@ impl SlintRenderer {
     // ─── Private helpers ───
 
     /// Render the first frame for an aura (triggered after configure).
-    fn render_first_frame_for_aura(&self, aura_id: &str) -> Result<(), RenderError> {
+    fn render_first_frame_for_aura(&self, aura_id: &str) -> Result<()> {
         let (window, width, height, pixels) = {
             let render_states = self.render_states.borrow();
             let render_state = render_states
                 .get(aura_id)
-                .ok_or_else(|| RenderError::AuraNotFound(aura_id.to_string()))?;
+                .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
 
             (
                 render_state.window.clone(),
@@ -394,7 +401,7 @@ impl SlintRenderer {
         let mut surfaces = self.surfaces.borrow_mut();
         let surface = surfaces
             .get_mut(aura_id)
-            .ok_or_else(|| RenderError::AuraNotFound(aura_id.to_string()))?;
+            .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
 
         surface
             .render_first_frame(|canvas, canvas_w, canvas_h| {
@@ -408,16 +415,16 @@ impl SlintRenderer {
                     &pixels,
                 );
             })
-            .map_err(|e| RenderError::RenderFailed(format!("first frame: {}", e)))
+            .map_err(|e| WaioError::SlintRender(format!("first frame: {}", e)))
     }
 
     /// Render a subsequent frame for an aura.
-    fn render_frame_for_aura(&self, aura_id: &str) -> Result<(), RenderError> {
+    fn render_frame_for_aura(&self, aura_id: &str) -> Result<()> {
         // Check if dirty first.
         {
             let render_states = self.render_states.borrow();
             let Some(render_state) = render_states.get(aura_id) else {
-                return Err(RenderError::AuraNotFound(aura_id.to_string()));
+                return Err(WaioError::AuraNotFound(aura_id.to_string()));
             };
             if !render_state.dirty {
                 return Ok(());
@@ -428,7 +435,7 @@ impl SlintRenderer {
             let render_states = self.render_states.borrow();
             let render_state = render_states
                 .get(aura_id)
-                .ok_or_else(|| RenderError::AuraNotFound(aura_id.to_string()))?;
+                .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
 
             (
                 render_state.window.clone(),
@@ -441,7 +448,7 @@ impl SlintRenderer {
         let mut surfaces = self.surfaces.borrow_mut();
         let surface = surfaces
             .get_mut(aura_id)
-            .ok_or_else(|| RenderError::AuraNotFound(aura_id.to_string()))?;
+            .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
 
         surface
             .render_frame(|canvas, canvas_w, canvas_h| {
@@ -455,13 +462,13 @@ impl SlintRenderer {
                     &pixels,
                 );
             })
-            .map_err(|e| RenderError::RenderFailed(format!("frame: {}", e)))
+            .map_err(|e| WaioError::SlintRender(format!("frame: {}", e)))
     }
 
     fn compile_slint(
         &self,
         code: &str,
-    ) -> Result<slint_interpreter::ComponentDefinition, RenderError> {
+    ) -> std::result::Result<slint_interpreter::ComponentDefinition, WaioError> {
         let compiler = Compiler::default();
         let result = spin_on::spin_on(
             compiler.build_from_source(code.to_string(), std::path::PathBuf::from("virtual.slint")),
@@ -484,7 +491,7 @@ impl SlintRenderer {
             .or_else(|| result.components().next())
             .ok_or_else(|| {
                 let names: Vec<_> = result.components().map(|c| c.name().to_string()).collect();
-                RenderError::SlintCompilationFailed(format!(
+                WaioError::SlintCompilation(format!(
                     "No component found. Available: {:?}",
                     names
                 ))
@@ -549,26 +556,30 @@ fn render_slint_to_canvas_with_persistent_buffer(
 }
 
 impl crate::usecase::render::Renderer for SlintRenderer {
-    fn init(&self) -> Result<(), RenderError> {
+    fn init(&self) -> Result<()> {
         info!("SlintRenderer initialized");
         Ok(())
     }
 
-    fn render_aura(&self, _aura: &Aura) -> Result<(), RenderError> {
-        Err(RenderError::RenderFailed(
+    fn render_aura(&self, _aura: &Aura) -> Result<()> {
+        Err(WaioError::SlintRender(
             "Use load_aura + on_surface_configured instead".into(),
         ))
     }
 
-    fn remove_aura(&self, aura_id: &str) -> Result<(), RenderError> {
+    fn remove_aura(&self, aura_id: &str) -> Result<()> {
         self.remove_aura(aura_id)
     }
 
-    fn update_aura(&self, _aura_id: &str, _slint_code: &str) -> Result<(), RenderError> {
-        Err(RenderError::RenderFailed("Not yet implemented".into()))
+    fn update_aura(&self, _aura_id: &str, _slint_code: &str) -> Result<()> {
+        Err(WaioError::SlintRender("Not yet implemented".into()))
     }
 
-    fn shutdown(&self) -> Result<(), RenderError> {
+    fn shutdown(&self) -> Result<()> {
+        // Stop all timer threads.
+        self.timer_registry.cancel_all();
+
+        // Close all surfaces.
         let mut surfaces = self.surfaces.borrow_mut();
         for (_, surface) in surfaces.iter_mut() {
             surface.close();
