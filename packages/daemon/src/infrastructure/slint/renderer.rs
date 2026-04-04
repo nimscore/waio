@@ -43,6 +43,7 @@ struct SubWindow {
     /// Whether this layer needs re-rendering.
     needs_render: bool,
     /// Whether this is a static layer (rendered once, never updated).
+    #[allow(dead_code)]
     is_static: bool,
 }
 
@@ -608,6 +609,7 @@ impl SlintRenderer {
     }
 
     /// Send a pixel buffer to the Wayland surface.
+    #[allow(dead_code)]
     fn send_to_wayland(
         &self,
         _pixels: &[Rgb565Pixel],
@@ -619,6 +621,7 @@ impl SlintRenderer {
     }
 
     /// Compile a single component from the Slint source code.
+    #[allow(dead_code)]
     fn compile_single_component(
         &self,
         code: &str,

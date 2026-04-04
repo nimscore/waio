@@ -184,6 +184,7 @@ impl AuraSurface {
     ///
     /// The `render_fn` closure receives a mutable ARGB8888 canvas and the configured dimensions.
     /// After drawing, this method requests a frame callback and transitions to `Rendering` state.
+    #[allow(dead_code)]
     pub fn render_first_frame<F>(&mut self, render_fn: F) -> Result<()>
     where
         F: FnOnce(&mut [u8], u32, u32),
@@ -222,6 +223,7 @@ impl AuraSurface {
     ///
     /// Only draws if the surface is marked as dirty. After drawing, requests a frame callback
     /// and clears the dirty flag.
+    #[allow(dead_code)]
     pub fn render_frame<F>(&mut self, render_fn: F) -> Result<()>
     where
         F: FnOnce(&mut [u8], u32, u32),
@@ -346,6 +348,7 @@ impl AuraSurface {
     }
 
     /// Low-level draw: create buffer → run render_fn → damage → attach → commit.
+    #[allow(dead_code)]
     fn draw<F>(&mut self, surface: &WlSurface, render_fn: F, (w, h): (u32, u32)) -> Result<()>
     where
         F: FnOnce(&mut [u8], u32, u32),
