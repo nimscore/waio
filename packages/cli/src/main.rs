@@ -57,10 +57,10 @@ async fn main() {
     let result = match cli.command {
         Commands::Load { path } => {
             let method = DaemonMethod::LoadAura {
+                id: None,
                 source: "file".to_string(),
                 path: Some(path.to_string_lossy().to_string()),
                 content: None,
-                id: path.file_stem().unwrap().to_string_lossy().to_string(),
             };
             client.send(method).await
         }

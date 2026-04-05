@@ -31,10 +31,12 @@ pub struct JsonRpcError {
 pub enum DaemonMethod {
     #[serde(rename = "aura.load")]
     LoadAura {
+        /// Optional aura ID. If None, the daemon uses meta.id from the .wa file.
+        #[serde(default)]
+        id: Option<String>,
         source: String,
         path: Option<String>,
         content: Option<String>,
-        id: String,
     },
 
     #[serde(rename = "aura.unload")]

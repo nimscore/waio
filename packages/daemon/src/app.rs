@@ -1,6 +1,8 @@
 use crate::controller::IpcServer;
+use crate::infrastructure::repository::FileAuraRepository;
 use crate::infrastructure::slint::SlintRenderer;
 use crate::infrastructure::wayland::WaylandConnection;
+use crate::usecase::aura::AuraRepository;
 use crate::usecase::render::Renderer;
 use anyhow::Result;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
@@ -13,7 +15,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 use waio_shared::config::WaioConfig;
 use waio_shared::entity::{Aura, AuraFile};
@@ -68,7 +70,15 @@ pub fn run() -> Result<()> {
     // 3. Give the renderer to WlState so handlers can dispatch events to it.
     wl_state.renderer = Some(renderer.clone());
 
-    // 4. Create the calloop event loop and insert WaylandSource into it.
+    // 4. Create the aura repository for persistence.
+    let data_dir = PathBuf::from(config.data_dir());
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        warn!("Failed to create data_dir {}: {}", data_dir.display(), e);
+    }
+    let repo = Arc::new(FileAuraRepository::new(data_dir.clone()));
+    info!("Aura repository initialized at: {}", data_dir.display());
+
+    // 5. Create the calloop event loop and insert WaylandSource into it.
     let mut event_loop: EventLoop<crate::infrastructure::wayland::WlState> =
         EventLoop::try_new().expect("Failed to create event loop");
 
@@ -80,6 +90,7 @@ pub fn run() -> Result<()> {
     let state = AppState::new();
     let auras = state.auras.clone();
     let renderer_for_ipc = renderer.clone();
+    let repo_for_ipc = repo.clone();
 
     let (tx, rx) = std::sync::mpsc::channel::<IpcCommand>();
 
@@ -132,6 +143,34 @@ pub fn run() -> Result<()> {
     info!("Waio Daemon running. Waiting for auras...");
     info!("Use waio-cli to load auras");
 
+    // 6. Recovery: restore previously loaded auras from the repository.
+    match repo.list() {
+        Ok(saved_auras) => {
+            for aura in saved_auras {
+                let aura_id = aura.id.clone();
+                if auras.lock().map(|a| a.contains_key(&aura_id)).unwrap_or(false) {
+                    warn!("Aura {} already in memory, skipping", aura_id);
+                    continue;
+                }
+                match renderer.load_aura(&aura, &aura_id, &mut wl_state) {
+                    Ok(_) => {
+                        let aura_name = aura.name.clone();
+                        if let Ok(mut a) = auras.lock() {
+                            a.insert(aura_id.clone(), aura);
+                        }
+                        info!("Restored aura: {} ({})", aura_id, aura_name);
+                    }
+                    Err(e) => {
+                        warn!("Failed to restore aura {}: {}", aura_id, e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to list saved auras: {}", e);
+        }
+    }
+
     // 6. Main dispatch loop.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_for_handler = shutdown_flag.clone();
@@ -175,6 +214,7 @@ pub fn run() -> Result<()> {
                         request,
                         auras.clone(),
                         renderer_for_ipc.clone(),
+                        repo_for_ipc.clone(),
                         &mut wl_state,
                         shutdown_for_handler.clone(),
                     );
@@ -202,6 +242,7 @@ fn handle_request(
     request: JsonRpcRequest,
     auras: Arc<Mutex<HashMap<String, Aura>>>,
     renderer: Rc<SlintRenderer>,
+    repo: Arc<FileAuraRepository>,
     wl_state: &mut crate::infrastructure::wayland::WlState,
     shutdown_flag: Arc<AtomicBool>,
 ) -> JsonRpcResponse {
@@ -212,7 +253,7 @@ fn handle_request(
             source,
             path,
             content,
-            id,
+            id: requested_id,
         }) => {
             let mut auras = match auras.lock() {
                 Ok(a) => a,
@@ -220,15 +261,6 @@ fn handle_request(
                     return rpc_error(-32000, &e.to_string(), None::<String>, request.id)
                 }
             };
-
-            if auras.contains_key(&id) {
-                return rpc_error(
-                    -32002,
-                    "Aura with this ID already loaded",
-                    None::<String>,
-                    request.id,
-                );
-            }
 
             let aura_file = match source.as_str() {
                 "file" => {
@@ -267,14 +299,27 @@ fn handle_request(
             match aura_file {
                 Ok(aura_file) => {
                     let aura = aura_file.to_aura();
+                    // Canonical ID: from YAML meta.id (or requested_id if provided).
+                    let aura_id = requested_id.unwrap_or_else(|| aura.id.clone());
 
-                    // Key change: load_aura creates the surface (pending state) and runs Lua.
-                    // The first render happens later when the compositor sends configure.
-                    match renderer.load_aura(&aura, &id, wl_state) {
+                    if auras.contains_key(&aura_id) {
+                        return rpc_error(
+                            -32002,
+                            &format!("Aura '{}' already loaded", aura_id),
+                            None::<String>,
+                            request.id,
+                        );
+                    }
+
+                    match renderer.load_aura(&aura, &aura_id, wl_state) {
                         Ok(_) => {
-                            auras.insert(id.clone(), aura);
+                            // Persist to disk.
+                            if let Err(e) = repo.save(&aura) {
+                                warn!("Failed to persist aura {}: {}", aura_id, e);
+                            }
+                            auras.insert(aura_id.clone(), aura);
                             rpc_success(
-                                serde_json::json!({ "status": "ok", "id": id }),
+                                serde_json::json!({ "status": "ok", "id": aura_id }),
                                 request.id,
                             )
                         }
@@ -301,6 +346,10 @@ fn handle_request(
 
             match renderer.remove_aura(&id) {
                 Ok(_) => {
+                    // Remove from persistence.
+                    if let Err(e) = repo.delete(&id) {
+                        warn!("Failed to remove persisted aura {}: {}", id, e);
+                    }
                     auras.remove(&id);
                     rpc_success(serde_json::json!({ "status": "ok" }), request.id)
                 }
@@ -361,11 +410,13 @@ fn handle_request(
             match AuraFile::from_content(&content) {
                 Ok(aura_file) => {
                     let aura = aura_file.to_aura();
-                    if let Err(e) = renderer.remove_aura(&id) {
-                        tracing::warn!("Failed to remove old aura '{}' during update: {}", id, e);
-                    }
+                    let _ = renderer.remove_aura(&id);
                     match renderer.load_aura(&aura, &id, wl_state) {
                         Ok(_) => {
+                            // Persist updated aura.
+                            if let Err(e) = repo.save(&aura) {
+                                warn!("Failed to persist updated aura {}: {}", id, e);
+                            }
                             auras.insert(id.clone(), aura);
                             rpc_success(
                                 serde_json::json!({ "status": "ok", "id": id }),

@@ -6,17 +6,17 @@ const DEFAULT_CONFIG_YAML: &str = r#"# Waio Configuration
 # Location: ~/.config/waio/config.yaml
 # Override: WAIO_CONFIG=/path/to/config.yaml
 
-# IPC socket path (default: $XDG_RUNTIME_DIR/waio.sock)
-socket_path: "/run/user/1000/waio.sock"
+# IPC socket path (default: $XDG_RUNTIME_DIR/waio.sock based on UID)
+# socket_path: "/run/user/1000/waio.sock"
 
 # Log level (default: "info,waio_daemon=debug")
 log_level: "info,waio_daemon=debug"
 
 # Persistent data directory (default: $XDG_DATA_HOME/waio)
-data_dir: "/home/user/.local/share/waio"
+# data_dir: "/home/user/.local/share/waio"
 
 # Default output (monitor) name, or null for auto-detect
-default_output: null
+# default_output: null
 "#;
 
 /// Unified configuration for both daemon and CLI.
@@ -134,7 +134,9 @@ mod tests {
     fn test_default_config_parses() {
         let config: WaioConfig = serde_yaml::from_str(DEFAULT_CONFIG_YAML)
             .expect("Default config YAML should parse");
-        assert!(config.socket_path.is_some());
+        // Optional paths are null — resolved programmatically.
+        assert!(config.socket_path.is_none());
+        assert!(config.data_dir.is_none());
         assert!(config.log_level.is_some());
     }
 
