@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
+use tracing::{debug, error, warn};
 
 /// Message sent by timer threads to the main loop.
 pub struct TimerFire {
@@ -21,20 +22,13 @@ pub struct TimerFire {
 #[derive(Clone)]
 pub struct TimerRegistry {
     next_id: Arc<AtomicU64>,
-    /// Timer ID → ActiveTimer (for cancellation by ID).
     timers: Arc<Mutex<HashMap<u64, ActiveTimer>>>,
-    /// Aura ID → list of timer IDs (for bulk cancellation).
     aura_timers: Arc<Mutex<HashMap<String, Vec<u64>>>>,
-    /// Lua callbacks keyed by timer ID.
     callbacks: Arc<Mutex<HashMap<u64, LuaFunction>>>,
-    /// Calloop channel sender for timer fire messages.
     fire_tx: Sender<TimerFire>,
 }
 
 impl TimerRegistry {
-    /// Create a new TimerRegistry with the given channel sender.
-    /// The caller is responsible for creating the channel and inserting
-    /// the receiver into the calloop event loop.
     pub fn new(fire_tx: Sender<TimerFire>) -> Self {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),
@@ -45,17 +39,38 @@ impl TimerRegistry {
         }
     }
 
+    /// Lock a mutex, recovering from poisoning.
+    fn lock<'a, T>(lock: &'a Mutex<T>, context: &str) -> std::sync::MutexGuard<'a, T> {
+        match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("Mutex poisoned in {}: {}", context, poisoned);
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Process a single timer fire — call the Lua callback.
     /// Called from the calloop event loop channel callback.
     pub fn process_single_fire(&self, fire: TimerFire) {
-        let cbs = self.callbacks.lock().unwrap();
-        if let Some(cb) = cbs.get(&fire.timer_id) {
-            let _ = cb.call::<()>(());
+        let cb_opt = {
+            let cbs = Self::lock(&self.callbacks, "process_single_fire");
+            cbs.get(&fire.timer_id).cloned()
+        };
+
+        match cb_opt {
+            Some(cb) => {
+                if let Err(e) = cb.call::<()>(()) {
+                    warn!("Timer {} callback error: {}", fire.timer_id, e);
+                }
+            }
+            None => {
+                debug!("Timer {} callback not found (already cancelled?)", fire.timer_id);
+            }
         }
     }
 
     /// Register a timer that fires every `ms` milliseconds.
-    /// The callback is called from the main thread via the fire channel.
     pub fn request_interval_for_aura(&self, aura_id: &str, ms: u32, cb: LuaFunction) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -63,27 +78,23 @@ impl TimerRegistry {
         let tx = self.fire_tx.clone();
         let aura = aura_id.to_string();
 
-        // Store callback.
-        self.callbacks.lock().unwrap().insert(id, cb);
+        {
+            let mut cbs = Self::lock(&self.callbacks, "request_interval");
+            cbs.insert(id, cb);
+        }
 
-        // Store timer info for cancellation.
-        let timer = ActiveTimer {
-            id,
-            stop_flag: stop_flag.clone(),
-        };
-        self.timers.lock().unwrap().insert(id, timer);
+        let timer = ActiveTimer { id, stop_flag: stop_flag.clone() };
+        {
+            let mut timers = Self::lock(&self.timers, "request_interval_timers");
+            timers.insert(id, timer);
+        }
 
-        // Associate timer with aura.
-        let aura_for_entry = aura.clone();
         let fire_aura = aura.clone();
-        self.aura_timers
-            .lock()
-            .unwrap()
-            .entry(aura_for_entry)
-            .or_default()
-            .push(id);
+        {
+            let mut aura_timers = Self::lock(&self.aura_timers, "request_interval_aura");
+            aura_timers.entry(aura).or_default().push(id);
+        }
 
-        // Spawn thread that sends fire messages.
         std::thread::spawn(move || {
             let interval = Duration::from_millis(ms as u64);
             loop {
@@ -107,27 +118,29 @@ impl TimerRegistry {
         let tx = self.fire_tx.clone();
         let aura = aura_id.to_string();
 
-        self.callbacks.lock().unwrap().insert(id, cb);
+        {
+            let mut cbs = Self::lock(&self.callbacks, "request_timeout");
+            cbs.insert(id, cb);
+        }
 
-        let timer = ActiveTimer {
-            id,
-            stop_flag: stop_flag.clone(),
-        };
-        self.timers.lock().unwrap().insert(id, timer);
+        let timer = ActiveTimer { id, stop_flag: stop_flag.clone() };
+        {
+            let mut timers = Self::lock(&self.timers, "request_timeout_timers");
+            timers.insert(id, timer);
+        }
 
-        let aura_for_entry = aura.clone();
         let fire_aura = aura.clone();
-        self.aura_timers
-            .lock()
-            .unwrap()
-            .entry(aura_for_entry)
-            .or_default()
-            .push(id);
+        {
+            let mut aura_timers = Self::lock(&self.aura_timers, "request_timeout_aura");
+            aura_timers.entry(aura).or_default().push(id);
+        }
 
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(ms as u64));
             if !stop_for_thread.load(Ordering::Relaxed) {
-                let _ = tx.send(TimerFire { timer_id: id, aura_id: fire_aura });
+                if tx.send(TimerFire { timer_id: id, aura_id: fire_aura }).is_err() {
+                    debug!("Timer {} send failed — channel disconnected", id);
+                }
             }
         });
 
@@ -135,36 +148,52 @@ impl TimerRegistry {
     }
 
     pub fn cancel(&self, id: u64) -> bool {
-        if let Some(timer) = self.timers.lock().unwrap().remove(&id) {
+        if let Some(timer) = Self::lock(&self.timers, "cancel").remove(&id) {
             timer.stop_flag.store(true, Ordering::Relaxed);
         }
-        self.callbacks.lock().unwrap().remove(&id);
-        let mut aura_timers = self.aura_timers.lock().unwrap();
-        for timers in aura_timers.values_mut() {
-            timers.retain(|t| *t != id);
+        Self::lock(&self.callbacks, "cancel_cb").remove(&id);
+        {
+            let mut aura_timers: std::sync::MutexGuard<'_, HashMap<String, Vec<u64>>> =
+                Self::lock(&self.aura_timers, "cancel_aura");
+            for timers in aura_timers.values_mut() {
+                timers.retain(|t| *t != id);
+            }
         }
         true
     }
 
     pub fn cancel_all_for_aura(&self, aura_id: &str) {
-        let mut aura_timers = self.aura_timers.lock().unwrap();
-        if let Some(timer_ids) = aura_timers.remove(aura_id) {
-            let mut timers = self.timers.lock().unwrap();
-            for id in timer_ids {
-                if let Some(timer) = timers.remove(&id) {
+        let timer_ids: Option<Vec<u64>> = {
+            let mut aura_timers = Self::lock(&self.aura_timers, "cancel_all_aura");
+            aura_timers.remove(aura_id)
+        };
+        let Some(timer_ids) = timer_ids else { return };
+
+        // Stop timers and collect callback IDs.
+        let callback_ids: Vec<u64> = {
+            let mut timers = Self::lock(&self.timers, "cancel_all_timers");
+            let mut ids = Vec::new();
+            for id in &timer_ids {
+                if let Some(timer) = timers.remove(id) {
                     timer.stop_flag.store(true, Ordering::Relaxed);
+                    ids.push(*id);
                 }
             }
+            ids
+        };
+
+        // Remove callbacks — memory leak fix.
+        {
+            let mut cbs = Self::lock(&self.callbacks, "cancel_all_callbacks");
+            for id in callback_ids {
+                cbs.remove(&id);
+            }
         }
-        self.callbacks.lock().unwrap().retain(|_, _| {
-            // Keep all callbacks — they're cleaned up on aura removal.
-            true
-        });
     }
 
     pub fn cancel_all(&self) {
-        let mut aura_timers = self.aura_timers.lock().unwrap();
-        let mut timers = self.timers.lock().unwrap();
+        let mut aura_timers = Self::lock(&self.aura_timers, "cancel_all");
+        let mut timers = Self::lock(&self.timers, "cancel_all_timers");
         for (_aura_id, timer_ids) in aura_timers.drain() {
             for id in timer_ids {
                 if let Some(timer) = timers.remove(&id) {
@@ -172,11 +201,10 @@ impl TimerRegistry {
                 }
             }
         }
-        self.callbacks.lock().unwrap().clear();
+        Self::lock(&self.callbacks, "cancel_all_callbacks").clear();
     }
 }
 
-/// A single active timer.
 struct ActiveTimer {
     #[allow(dead_code)]
     id: u64,

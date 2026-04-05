@@ -6,6 +6,7 @@ use anyhow::Result;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -14,6 +15,7 @@ use std::sync::{
 use std::time::Duration;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
+use waio_shared::config::WaioConfig;
 use waio_shared::entity::{Aura, AuraFile};
 use waio_shared::protocol::{
     DaemonMethod, JsonRpcRequest, JsonRpcResponse, rpc_error, rpc_success,
@@ -38,8 +40,13 @@ impl AppState {
 /// Main daemon entry point. Sets up Wayland, Slint renderer, calloop event loop,
 /// IPC server, and runs the dispatch loop.
 pub fn run() -> Result<()> {
-    info!("Starting Waio Daemon...");
-    init_logging();
+    // Load configuration: WAIO_CONFIG env → ~/.config/waio/config.yaml → create default
+    let config = WaioConfig::load()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+
+    init_logging(&config.log_level());
+
+    info!("Config loaded: socket={}, data_dir={}", config.socket_path(), config.data_dir());
 
     if std::env::var("WAYLAND_DISPLAY").is_err() {
         anyhow::bail!(
@@ -89,7 +96,7 @@ pub fn run() -> Result<()> {
             }
         };
 
-        let ipc_server = IpcServer::new();
+        let ipc_server = IpcServer::with_socket_path(Some(PathBuf::from(config.socket_path())));
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -178,10 +185,14 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Cleanup on exit.
+    // Graceful shutdown: close surfaces, cancel timers, clean up resources.
+    info!("Starting graceful shutdown...");
+    let aura_count = auras.lock().map(|a| a.len()).unwrap_or(0);
+    info!("Shutting down {} aura(s)...", aura_count);
     if let Err(e) = renderer.shutdown() {
         tracing::warn!("Shutdown error: {}", e);
     }
+    info!("Waio Daemon shutdown complete");
 
     Ok(())
 }
@@ -297,7 +308,7 @@ fn handle_request(
             }
         }
 
-        Ok(DaemonMethod::ListAuras) => {
+        Ok(DaemonMethod::SystemStatus) => {
             let auras = match auras.lock() {
                 Ok(a) => a,
                 Err(e) => {
@@ -305,7 +316,7 @@ fn handle_request(
                 }
             };
 
-            let list: Vec<serde_json::Value> = auras
+            let auras_list: Vec<serde_json::Value> = auras
                 .iter()
                 .map(|(id, aura)| {
                     serde_json::json!({
@@ -316,22 +327,11 @@ fn handle_request(
                 })
                 .collect();
 
-            rpc_success(serde_json::json!({ "auras": list }), request.id)
-        }
-
-        Ok(DaemonMethod::SystemInfo) => {
-            let auras = match auras.lock() {
-                Ok(a) => a,
-                Err(e) => {
-                    return rpc_error(-32000, &e.to_string(), None, request.id)
-                }
-            };
-
             rpc_success(
                 serde_json::json!({
+                    "status": "running",
                     "version": "0.1.0",
-                    "name": "Waio Daemon",
-                    "auras_count": auras.len()
+                    "auras": auras_list
                 }),
                 request.id,
             )
@@ -361,7 +361,9 @@ fn handle_request(
             match AuraFile::from_content(&content) {
                 Ok(aura_file) => {
                     let aura = aura_file.to_aura();
-                    let _ = renderer.remove_aura(&id);
+                    if let Err(e) = renderer.remove_aura(&id) {
+                        tracing::warn!("Failed to remove old aura '{}' during update: {}", id, e);
+                    }
                     match renderer.load_aura(&aura, &id, wl_state) {
                         Ok(_) => {
                             auras.insert(id.clone(), aura);
@@ -383,11 +385,12 @@ fn handle_request(
     }
 }
 
-fn init_logging() {
+fn init_logging(log_level: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,waio_daemon=debug")),
+                .unwrap_or_else(|_| EnvFilter::new(log_level)),
         )
         .try_init();
+    info!("Starting Waio Daemon...");
 }

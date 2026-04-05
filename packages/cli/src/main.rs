@@ -33,10 +33,8 @@ enum Commands {
         /// ID of the Aura to unload
         id: String,
     },
-    /// List loaded Auras
-    List,
-    /// Show daemon info
-    Info,
+    /// Show daemon status and loaded auras
+    Status,
     /// Stop the daemon
     Stop,
 }
@@ -44,7 +42,17 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let client = IpcClient::new();
+
+    // Load config: CLI reads from the same shared path as the daemon.
+    let config = match waio_shared::config::WaioConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\x1b[33mWarning\x1b[0m: Could not load config, using defaults: {}", e);
+            waio_shared::config::WaioConfig::default()
+        }
+    };
+
+    let client = IpcClient::new(&config.socket_path());
 
     let result = match cli.command {
         Commands::Load { path } => {
@@ -69,12 +77,8 @@ async fn main() {
             let method = DaemonMethod::UnloadAura { id };
             client.send(method).await
         }
-        Commands::List => {
-            let method = DaemonMethod::ListAuras;
-            client.send(method).await
-        }
-        Commands::Info => {
-            let method = DaemonMethod::SystemInfo;
+        Commands::Status => {
+            let method = DaemonMethod::SystemStatus;
             client.send(method).await
         }
         Commands::Stop => {

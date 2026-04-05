@@ -12,10 +12,16 @@ pub struct IpcServer {
 
 impl IpcServer {
     pub fn new() -> Self {
-        let socket_path = std::env::var("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            .join("waio.sock");
+        Self::with_socket_path(None)
+    }
+
+    pub fn with_socket_path(path: Option<PathBuf>) -> Self {
+        let socket_path = path.unwrap_or_else(|| {
+            std::env::var("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/tmp"))
+                .join("waio.sock")
+        });
 
         if socket_path.exists() {
             if !is_socket_in_use(&socket_path) {

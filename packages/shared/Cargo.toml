@@ -11,3 +11,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
+dirs = { workspace = true }
+libc = "0.2"

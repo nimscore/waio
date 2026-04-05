@@ -9,7 +9,8 @@
       "WebSearch",
       "Bash(cargo check *)",
       "Bash(cargo build *)",
-      "Bash(cargo tree *)"
+      "Bash(cargo tree *)",
+      "Bash(cargo test *)"
     ]
   },
   "$version": 3

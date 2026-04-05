@@ -43,11 +43,8 @@ pub enum DaemonMethod {
     #[serde(rename = "aura.update")]
     UpdateAura { id: String, content: String },
 
-    #[serde(rename = "aura.list")]
-    ListAuras,
-
-    #[serde(rename = "system.info")]
-    SystemInfo,
+    #[serde(rename = "system.status")]
+    SystemStatus,
 
     #[serde(rename = "system.shutdown")]
     SystemShutdown,

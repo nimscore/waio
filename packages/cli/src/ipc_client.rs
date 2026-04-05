@@ -8,13 +8,10 @@ pub struct IpcClient {
 }
 
 impl IpcClient {
-    pub fn new() -> Self {
-        let socket_path = std::env::var("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            .join("waio.sock");
-
-        Self { socket_path }
+    pub fn new(socket_path: &str) -> Self {
+        Self {
+            socket_path: PathBuf::from(socket_path),
+        }
     }
 
     pub async fn send(&self, method: DaemonMethod) -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
@@ -26,8 +23,7 @@ impl IpcClient {
                 DaemonMethod::LoadAura { .. } => "aura.load",
                 DaemonMethod::UnloadAura { .. } => "aura.unload",
                 DaemonMethod::UpdateAura { .. } => "aura.update",
-                DaemonMethod::ListAuras => "aura.list",
-                DaemonMethod::SystemInfo => "system.info",
+                DaemonMethod::SystemStatus => "system.status",
                 DaemonMethod::SystemShutdown => "system.shutdown",
             }.to_string(),
             params: serde_json::to_value(&method)?,

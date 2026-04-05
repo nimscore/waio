@@ -11,6 +11,7 @@ use smithay_client_toolkit::shell::wlr_layer::{LayerSurface, LayerSurfaceConfigu
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::LazyLock;
 use tracing::{error, info, warn};
 
 use crate::error::{Result, WaioError};
@@ -70,14 +71,20 @@ struct AuraRenderState {
 }
 
 /// Central renderer managing all aura Slint components and Wayland surfaces.
+///
+/// # Memory Safety
+/// All `Rc<RefCell<>>` fields are owned by this struct and have no back-references.
+/// `WlState` holds a shared `Rc<SlintRenderer>` but does not own any of the inner
+/// `Rc<RefCell<>>` collections — it only borrows them through method calls.
+/// No reference cycles exist.
 pub struct SlintRenderer {
-    /// Per-aura Slint render state.
+    /// Per-aura Slint render state. Owned, no back-references.
     render_states: Rc<RefCell<HashMap<String, AuraRenderState>>>,
-    /// Per-aura Wayland surface state.
+    /// Per-aura Wayland surface state. Owned, no back-references.
     surfaces: Rc<RefCell<HashMap<String, AuraSurface>>>,
     /// Cancellable Lua timers.
     timer_registry: TimerRegistry,
-    /// Shared Lua state.
+    /// Shared Lua state. Owned.
     lua_state: Rc<RefCell<mlua::Lua>>,
     /// Command queue for Lua → Slint property updates.
     command_queue: CommandQueue,
@@ -91,7 +98,7 @@ impl SlintRenderer {
         let (timer_tx, timer_rx) = channel::channel::<TimerFire>();
         let timer_registry = TimerRegistry::new(timer_tx);
         let lua = mlua::Lua::new();
-        let _ = lua::register_all(&lua);
+        lua::register_all(&lua).expect("Failed to register waio Lua modules");
 
         let self_ = Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
@@ -181,10 +188,9 @@ impl SlintRenderer {
             )
             .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
-            match lua.load(lua_code).exec() {
-                Ok(_) => info!("Lua code executed for aura: {}", aura.id),
-                Err(e) => error!("Lua error for aura {}: {}", aura.id, e),
-            }
+            lua.load(lua_code).exec()
+                .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
+            info!("Lua code executed for aura: {}", aura.id);
         }
 
         info!(
@@ -509,6 +515,9 @@ impl SlintRenderer {
     pub fn remove_aura(&self, aura_id: &str) -> Result<()> {
         self.timer_registry.cancel_all_for_aura(aura_id);
 
+        // Clear property store for this aura.
+        crate::infrastructure::lua::slint_bridge::clear_property_store(aura_id);
+
         {
             let mut surfaces = self.surfaces.borrow_mut();
             if let Some(surface) = surfaces.get_mut(aura_id) {
@@ -767,10 +776,14 @@ fn blit_layer(
     }
 }
 
+/// Pre-compiled regex for extracting component names from Slint source.
+static COMPONENT_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"export\s+component\s+(\w+)").unwrap());
+
 /// Extract all `export component` names from Slint source code.
 fn extract_component_names(code: &str) -> Vec<String> {
-    let re = Regex::new(r"export\s+component\s+(\w+)").unwrap();
-    re.captures_iter(code)
+    COMPONENT_NAME_RE
+        .captures_iter(code)
         .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
         .collect()
 }
