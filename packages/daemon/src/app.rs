@@ -52,10 +52,11 @@ pub fn run() -> Result<()> {
 
     // 2. Create the Slint renderer — it owns compositor and qh.
     //    LayerShell and Shm remain in WlState and are borrowed during load_aura.
-    let renderer = Rc::new(SlintRenderer::new(
+    let (renderer, timer_channel) = SlintRenderer::new(
         wl_state.compositor_state.clone(),
         wl_conn.qh.clone(),
-    ));
+    );
+    let renderer = Rc::new(renderer);
 
     // 3. Give the renderer to WlState so handlers can dispatch events to it.
     wl_state.renderer = Some(renderer.clone());
@@ -102,6 +103,25 @@ pub fn run() -> Result<()> {
         });
     }
 
+    // 5b. Insert the timer channel into the calloop event loop.
+    // Timer fires from Lua threads are delivered as calloop events, invoking
+    // the callback in the main thread (safe for Lua API calls).
+    {
+        let renderer_for_timer = renderer.clone();
+        event_loop
+            .handle()
+            .insert_source(
+                timer_channel,
+                move |event, (), _shared_data| {
+                    if let smithay_client_toolkit::reexports::calloop::channel::Event::Msg(fire) = event {
+                        renderer_for_timer.process_single_timer_fire(fire);
+                    }
+                },
+            )
+            .expect("Failed to insert timer channel into event loop");
+        info!("Timer channel inserted into event loop");
+    }
+
     info!("Waio Daemon running. Waiting for auras...");
     info!("Use waio-cli to load auras");
 
@@ -130,12 +150,11 @@ pub fn run() -> Result<()> {
             break;
         }
 
-        // Process Lua property updates and redraw dirty surfaces (replaces timer).
+        // Process Lua property updates and redraw dirty surfaces.
         if let Err(e) = renderer_for_ipc.process_commands() {
             tracing::warn!("Command processing error: {}", e);
         }
-        // Process timer fires — calls Lua callbacks in the main thread.
-        renderer_for_ipc.process_timer_fires();
+        // Timer fires are handled by calloop channel callback (inserted above).
         if let Err(e) = renderer_for_ipc.redraw_all() {
             tracing::warn!("Redraw error: {}", e);
         }

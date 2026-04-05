@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use smithay_client_toolkit::reexports::calloop::channel::Sender;
+
 /// Message sent by timer threads to the main loop.
 pub struct TimerFire {
     #[allow(dead_code)]
@@ -11,10 +13,11 @@ pub struct TimerFire {
     pub timer_id: u64,
 }
 
-/// Timer registry with aura tracking and calloop-compatible fire messages.
+/// Timer registry with aura tracking and calloop-compatible channel.
 ///
-/// Timer threads send `TimerFire` through a crossbeam channel. The main loop
-/// receives these and calls the Lua callbacks in the main thread.
+/// Timer threads send `TimerFire` through a calloop channel. The main loop
+/// receives these via the calloop event loop and calls the Lua callbacks in
+/// the main thread.
 #[derive(Clone)]
 pub struct TimerRegistry {
     next_id: Arc<AtomicU64>,
@@ -24,32 +27,30 @@ pub struct TimerRegistry {
     aura_timers: Arc<Mutex<HashMap<String, Vec<u64>>>>,
     /// Lua callbacks keyed by timer ID.
     callbacks: Arc<Mutex<HashMap<u64, LuaFunction>>>,
-    /// Channel for timer fire messages. Main loop polls this.
-    pub fire_tx: crossbeam_channel::Sender<TimerFire>,
-    pub fire_rx: crossbeam_channel::Receiver<TimerFire>,
+    /// Calloop channel sender for timer fire messages.
+    fire_tx: Sender<TimerFire>,
 }
 
 impl TimerRegistry {
-    pub fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
+    /// Create a new TimerRegistry with the given channel sender.
+    /// The caller is responsible for creating the channel and inserting
+    /// the receiver into the calloop event loop.
+    pub fn new(fire_tx: Sender<TimerFire>) -> Self {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),
             timers: Arc::new(Mutex::new(HashMap::new())),
             aura_timers: Arc::new(Mutex::new(HashMap::new())),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
-            fire_tx: tx,
-            fire_rx: rx,
+            fire_tx,
         }
     }
 
-    /// Process all pending timer fires. Call this from the main event loop.
-    /// Calls Lua callbacks in the main thread (safe).
-    pub fn process_fires(&self) {
-        while let Ok(fire) = self.fire_rx.try_recv() {
-            let cbs = self.callbacks.lock().unwrap();
-            if let Some(cb) = cbs.get(&fire.timer_id) {
-                let _ = cb.call::<()>(());
-            }
+    /// Process a single timer fire — call the Lua callback.
+    /// Called from the calloop event loop channel callback.
+    pub fn process_single_fire(&self, fire: TimerFire) {
+        let cbs = self.callbacks.lock().unwrap();
+        if let Some(cb) = cbs.get(&fire.timer_id) {
+            let _ = cb.call::<()>(());
         }
     }
 

@@ -15,7 +15,9 @@ use tracing::{error, info, warn};
 
 use crate::error::{Result, WaioError};
 use crate::infrastructure::lua;
-use crate::infrastructure::lua::timer::TimerRegistry;
+use crate::infrastructure::lua::timer::{TimerFire, TimerRegistry};
+use smithay_client_toolkit::reexports::calloop::channel;
+use smithay_client_toolkit::reexports::calloop::channel::Channel;
 use crate::infrastructure::slint::aura_handle::{new_command_queue, CommandQueue};
 use crate::infrastructure::wayland::{AuraSurface, WlState};
 #[allow(unused_imports)]
@@ -85,12 +87,13 @@ pub struct SlintRenderer {
 }
 
 impl SlintRenderer {
-    pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> Self {
-        let timer_registry = TimerRegistry::new();
+    pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> (Self, Channel<TimerFire>) {
+        let (timer_tx, timer_rx) = channel::channel::<TimerFire>();
+        let timer_registry = TimerRegistry::new(timer_tx);
         let lua = mlua::Lua::new();
         let _ = lua::register_all(&lua);
 
-        Self {
+        let self_ = Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
             surfaces: Rc::new(RefCell::new(HashMap::new())),
             timer_registry,
@@ -98,7 +101,8 @@ impl SlintRenderer {
             command_queue: new_command_queue(),
             compositor,
             qh,
-        }
+        };
+        (self_, timer_rx)
     }
 
     // ─── Aura lifecycle ───
@@ -129,6 +133,20 @@ impl SlintRenderer {
         }
 
         // Create the Wayland layer surface.
+        // Resolve output: explicit name from config → auto-detect (default output).
+        let output_name = aura.config.output.as_deref();
+        let output = wl_state.get_output(output_name);
+        let output_label = if let Some(name) = output_name {
+            if output.is_some() {
+                format!("explicit: {}", name)
+            } else {
+                format!("explicit '{}' not found, using auto-detect", name)
+            }
+        } else {
+            "auto-detect (default)".to_string()
+        };
+        info!("Output for aura '{}': {}", external_id, output_label);
+
         let surface = AuraSurface::new(
             &self.compositor,
             &wl_state.layer_shell,
@@ -136,7 +154,7 @@ impl SlintRenderer {
             &self.qh,
             external_id.to_string(),
             &aura.config,
-            aura.config.output.as_deref().and_then(|name| wl_state.get_output(Some(name))),
+            output,
         )
         .map_err(|e| WaioError::Wayland(anyhow::anyhow!("{}", e)))?;
 
@@ -457,9 +475,10 @@ impl SlintRenderer {
         Ok(())
     }
 
-    /// Process timer fire events — calls Lua callbacks in the main thread (safe).
-    pub fn process_timer_fires(&self) {
-        self.timer_registry.process_fires();
+    /// Process a single timer fire event — calls the Lua callback in the main thread (safe).
+    /// Called from the calloop event loop channel callback.
+    pub fn process_single_timer_fire(&self, fire: TimerFire) {
+        self.timer_registry.process_single_fire(fire);
     }
 
     /// Redraw all dirty surfaces.

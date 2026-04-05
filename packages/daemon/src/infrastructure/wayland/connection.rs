@@ -39,8 +39,10 @@ impl OutputTracker {
     #[allow(dead_code)]
     pub fn get_output(&self, name: Option<&str>) -> Option<&WlOutput> {
         if let Some(name) = name {
-            self.outputs.get(name)
+            // Try explicit name; fall back to default if not found.
+            self.outputs.get(name).or(self.default_output.as_ref())
         } else {
+            // No name specified — use default.
             self.default_output.as_ref()
         }
     }

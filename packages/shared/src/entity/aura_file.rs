@@ -30,6 +30,9 @@ pub struct AuraConfigYaml {
     pub width: u32,
     pub height: u32,
     pub exclusive_zone: i32,
+    /// Optional output (monitor) name to bind to.
+    #[serde(default)]
+    pub output: Option<String>,
     #[serde(default)]
     pub margin: Margin,
 }
@@ -110,7 +113,7 @@ impl AuraFile {
                     height: self.config.height,
                 },
                 exclusive_zone: self.config.exclusive_zone,
-                output: None,
+                output: self.config.output.clone(),
             },
             layers,
         }
