@@ -55,3 +55,66 @@ impl AuraRepository for FileAuraRepository {
         Ok(auras)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waio_shared::entity::{AuraType, LayerAnchor, Size};
+
+    fn make_test_aura(id: &str) -> Aura {
+        Aura {
+            id: id.to_string(),
+            name: "Test".into(),
+            aura_type: AuraType::Bar,
+            slint_code: "export component X inherits Window {}".into(),
+            lua_code: Some("print('test')".into()),
+            config: waio_shared::entity::AuraConfig {
+                anchor: LayerAnchor::Top,
+                size: Size { width: 1920, height: 40 },
+                exclusive_zone: 40,
+                output: None,
+            },
+            layers: vec![],
+            permissions: vec!["timer".into()],
+        }
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = FileAuraRepository::new(temp_dir.path().to_path_buf());
+        let aura = make_test_aura("test-1");
+        repo.save(&aura).unwrap();
+        let loaded = repo.get("test-1").unwrap();
+        assert_eq!(loaded.id, "test-1");
+        assert_eq!(loaded.name, "Test");
+        assert_eq!(loaded.permissions, vec!["timer"]);
+    }
+
+    #[test]
+    fn test_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = FileAuraRepository::new(temp_dir.path().to_path_buf());
+        let aura = make_test_aura("test-2");
+        repo.save(&aura).unwrap();
+        repo.delete("test-2").unwrap();
+        assert!(repo.get("test-2").is_err());
+    }
+
+    #[test]
+    fn test_list() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = FileAuraRepository::new(temp_dir.path().to_path_buf());
+        repo.save(&make_test_aura("a")).unwrap();
+        repo.save(&make_test_aura("b")).unwrap();
+        let auras = repo.list().unwrap();
+        assert_eq!(auras.len(), 2);
+    }
+
+    #[test]
+    fn test_get_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = FileAuraRepository::new(temp_dir.path().to_path_buf());
+        assert!(matches!(repo.get("nonexistent"), Err(AuraError::NotFound(_))));
+    }
+}

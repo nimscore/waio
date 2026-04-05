@@ -89,3 +89,70 @@ pub fn create_restricted_env(lua: &Lua) -> LuaResult<LuaTable> {
 
     Ok(env)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::prelude::*;
+    use mlua::StdLib;
+
+    fn make_sandbox() -> Lua {
+        let lua = Lua::new_with(
+            StdLib::ALL_SAFE,
+            LuaOptions::new().catch_rust_panics(true),
+        ).unwrap();
+        sanitize_globals(&lua).unwrap();
+        lua
+    }
+
+    #[test]
+    fn test_os_execute_is_nil() {
+        let lua = make_sandbox();
+        let os_tbl: LuaTable = lua.globals().get("os").unwrap();
+        let exec: LuaValue = os_tbl.get("execute").unwrap();
+        assert!(matches!(exec, LuaValue::Nil));
+    }
+
+    #[test]
+    fn test_io_popen_is_nil() {
+        let lua = make_sandbox();
+        let io_tbl: LuaTable = lua.globals().get("io").unwrap();
+        let popen: LuaValue = io_tbl.get("popen").unwrap();
+        assert!(matches!(popen, LuaValue::Nil));
+    }
+
+    #[test]
+    fn test_dofile_is_nil() {
+        let lua = make_sandbox();
+        let dofile: LuaValue = lua.globals().get("dofile").unwrap();
+        assert!(matches!(dofile, LuaValue::Nil));
+    }
+
+    #[test]
+    fn test_allowed_functions_work() {
+        let lua = make_sandbox();
+        let env = create_restricted_env(&lua).unwrap();
+
+        // print должен быть доступен.
+        let print_fn: LuaValue = env.get("print").unwrap();
+        assert!(matches!(print_fn, LuaValue::Function(_)));
+
+        // table.insert должен быть доступен.
+        let table_tbl: LuaTable = env.get("table").unwrap();
+        let insert_fn: LuaValue = table_tbl.get("insert").unwrap();
+        assert!(matches!(insert_fn, LuaValue::Function(_)));
+
+        // tostring должен быть доступен.
+        let tostring_fn: LuaValue = env.get("tostring").unwrap();
+        assert!(matches!(tostring_fn, LuaValue::Function(_)));
+    }
+
+    #[test]
+    fn test_env_g_points_to_self() {
+        let lua = make_sandbox();
+        let env = create_restricted_env(&lua).unwrap();
+        let g: LuaValue = env.get("_G").unwrap();
+        // _G должен быть таблицей (указывает на себя).
+        assert!(matches!(g, LuaValue::Table(_)));
+    }
+}

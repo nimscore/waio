@@ -249,3 +249,61 @@ pub fn create_module(
 
     Ok(m)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay_client_toolkit::reexports::calloop::channel;
+
+    fn make_registry() -> TimerRegistry {
+        let (tx, _rx) = channel::channel::<TimerFire>();
+        TimerRegistry::new(tx)
+    }
+
+    #[test]
+    fn test_create_and_cancel_timer() {
+        let reg = make_registry();
+        let lua = mlua::Lua::new();
+        let cb = lua.create_function(|_, ()| Ok(())).unwrap();
+        let id = reg.request_interval_for_aura("test-aura", 1000, cb);
+        assert!(id > 0);
+        assert!(reg.cancel(id));
+    }
+
+    #[test]
+    fn test_cancel_all_for_aura_removes_callbacks() {
+        let reg = make_registry();
+        let lua = mlua::Lua::new();
+        let cb1 = lua.create_function(|_, ()| Ok(())).unwrap();
+        let cb2 = lua.create_function(|_, ()| Ok(())).unwrap();
+        reg.request_interval_for_aura("aura-1", 1000, cb1);
+        reg.request_interval_for_aura("aura-1", 2000, cb2);
+        reg.request_interval_for_aura("aura-2", 1000, lua.create_function(|_, ()| Ok(())).unwrap());
+        reg.cancel_all_for_aura("aura-1");
+        // Callbacks for aura-1 should be removed.
+        let cbs = reg.callbacks.lock().unwrap();
+        // All remaining callbacks should be for aura-2 only.
+        assert!(cbs.len() <= 1);
+    }
+
+    #[test]
+    fn test_process_single_fire_calls_callback() {
+        let reg = make_registry();
+        let lua = mlua::Lua::new();
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = called.clone();
+        let cb = lua.create_function(move |_, ()| {
+            called_clone.store(true, Ordering::Relaxed);
+            Ok(())
+        }).unwrap();
+        let id = reg.request_timeout_for_aura("test", 100, cb);
+        reg.process_single_fire(TimerFire { aura_id: "test".into(), timer_id: id });
+        assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_timer_returns_true() {
+        let reg = make_registry();
+        assert!(reg.cancel(99999));
+    }
+}

@@ -2,6 +2,8 @@ pub mod sandbox;
 pub mod time;
 pub mod timer;
 pub mod slint_bridge;
+pub mod fs;
+pub mod http;
 
 use mlua::prelude::*;
 

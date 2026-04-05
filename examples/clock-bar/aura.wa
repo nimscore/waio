@@ -4,10 +4,12 @@ meta:
   name: Clock Bar
   version: 2.0.0
   author: Waio Team
-  description: Upper panel with clock and date — sub-component rendering
+  description: Upper panel with clock, date, fs and http demos
   permissions:
     - timer
     - system_time
+    - fs_read
+    - http
 
 config:
   anchor: top
@@ -67,15 +69,46 @@ export component DateLayer inherits Window {
         font-size: 14px;
     }
 }
+
+// FS demo layer — shows one word at a time from a file
+export component FsLayer inherits Window {
+    width: 260px;
+    height: 20px;
+    background: transparent;
+    in property <string> fs_text: "fs: loading...";
+
+    Text {
+        text: parent.fs_text;
+        color: #4ade80;
+        font-size: 13px;
+    }
+}
+
+// HTTP demo layer — shows post title from JSON API
+export component HttpLayer inherits Window {
+    width: 280px;
+    height: 20px;
+    background: transparent;
+    in property <string> http_text: "http: loading...";
+
+    Text {
+        text: parent.http_text;
+        color: #60a5fa;
+        font-size: 13px;
+    }
+}
 </slint>
 
 <layout>
-Background: { x: 0, y: 0, w: 1920, h: 40, dynamic: false }
-TimeLayer: { x: 10, y: 10, w: 130, h: 24 }
-DateLayer: { x: 150, y: 12, w: 120, h: 20 }
+Background:  { x: 0,   y: 0, w: 1920, h: 40, dynamic: false }
+TimeLayer:   { x: 10,  y: 10, w: 130,  h: 24 }
+DateLayer:   { x: 150, y: 12, w: 120,  h: 20 }
+FsLayer:     { x: 300, y: 12, w: 260,  h: 20 }
+HttpLayer:   { x: 580, y: 12, w: 280,  h: 20 }
 </layout>
 
 <lua>
+-- Time and date: update every second
 waio.timer.interval(1000, function()
     local time = waio.time.now()
     local date = waio.time.format("%Y-%m-%d")
@@ -84,5 +117,69 @@ waio.timer.interval(1000, function()
     slint.set_property("DateLayer.date_text", date)
 end)
 
-print("Clock Bar Aura loaded!")
+-- FS demo: read file and show one word at a time, rotating every 2 seconds
+local fs_words = {}
+local fs_word_idx = 0
+
+-- Read README.md and split into words
+local ok, content = pcall(function()
+    return waio.fs.read_file("README.md")
+end)
+if ok and content then
+    -- Split by whitespace into words
+    for word in content:gmatch("%S+") do
+        table.insert(fs_words, word)
+    end
+    fs_word_idx = 1
+end
+
+waio.timer.interval(2000, function()
+    if #fs_words == 0 then
+        slint.set_property("FsLayer.fs_text", "fs: no data")
+        return
+    end
+    local word = fs_words[fs_word_idx]
+    -- Truncate long words for display
+    if #word > 25 then word = word:sub(1, 25) .. "…" end
+    slint.set_property("FsLayer.fs_text", "fs: " .. word .. " [" .. fs_word_idx .. "/" .. #fs_words .. "]")
+    fs_word_idx = fs_word_idx + 1
+    if fs_word_idx > #fs_words then fs_word_idx = 1 end
+end)
+
+-- HTTP demo: fetch posts and show their titles, cycling every 8 seconds
+local http_posts = {}
+local http_idx = 0
+
+-- Fetch 5 posts once, then cycle through them
+waio.timer.timeout(1500, function()
+    for i = 1, 5 do
+        local ok, resp = pcall(function()
+            return waio.http.get("https://jsonplaceholder.typicode.com/posts/" .. i)
+        end)
+        if ok and resp and resp.status == 200 then
+            -- Extract title from JSON body
+            local title = resp.body:match('"title"%s*:%s*"([^"]*)"')
+            if title then
+                table.insert(http_posts, { id = i, title = title })
+            end
+        end
+    end
+    if #http_posts > 0 then
+        http_idx = 1
+        local post = http_posts[http_idx]
+        slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 40))
+    else
+        slint.set_property("HttpLayer.http_text", "http: failed to load")
+    end
+end)
+
+waio.timer.interval(8000, function()
+    if #http_posts == 0 then return end
+    http_idx = http_idx + 1
+    if http_idx > #http_posts then http_idx = 1 end
+    local post = http_posts[http_idx]
+    slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 40))
+end)
+
+print("Clock Bar Aura loaded with fs + http demos!")
 </lua>

@@ -61,3 +61,36 @@ pub fn register_slint_in_env(lua: &Lua, env: &LuaTable, aura_id: String, queue: 
     lua.globals().set("slint", slint_table)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_and_get_property() {
+        update_property_store("aura-1", "TimeLayer.time_text", "12:00:00");
+        let val = get_property_from_store("aura-1", "TimeLayer.time_text");
+        assert_eq!(val, Some("12:00:00".to_string()));
+    }
+
+    #[test]
+    fn test_clear_property_store() {
+        update_property_store("aura-1", "prop", "value");
+        clear_property_store("aura-1");
+        let val = get_property_from_store("aura-1", "prop");
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_aura_isolation() {
+        update_property_store("aura-1", "shared_prop", "value1");
+        update_property_store("aura-2", "shared_prop", "value2");
+        assert_eq!(get_property_from_store("aura-1", "shared_prop"), Some("value1".to_string()));
+        assert_eq!(get_property_from_store("aura-2", "shared_prop"), Some("value2".to_string()));
+    }
+
+    #[test]
+    fn test_missing_property_returns_none() {
+        assert_eq!(get_property_from_store("nonexistent", "prop"), None);
+    }
+}

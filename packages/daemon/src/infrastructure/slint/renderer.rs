@@ -205,7 +205,26 @@ impl SlintRenderer {
             waio_globals.set("timer", timer_module)?;
 
             // Copy waio (now with timer) to restricted env.
-            env.set("waio", waio_globals)?;
+            env.set("waio", &waio_globals)?;
+
+            // Register waio.fs if the aura has fs_read permission.
+            if aura.permissions.iter().any(|p| p == "fs_read") {
+                let fs_access = lua::fs::FsAccess::new(vec![
+                    std::env::current_dir().unwrap_or_default(),
+                    dirs::config_dir().unwrap_or_default().join("waio/widgets"),
+                ]);
+                let fs_module = lua::fs::create_module(&lua, fs_access)?;
+                waio_globals.set("fs", fs_module)?;
+                info!("Registered waio.fs for aura: {}", external_id);
+            }
+
+            // Register waio.http if the aura has http permission.
+            if aura.permissions.iter().any(|p| p == "http") {
+                let http_access = lua::http::HttpAccess::new(vec![]);
+                let http_module = lua::http::create_module(&lua, http_access)?;
+                waio_globals.set("http", http_module)?;
+                info!("Registered waio.http for aura: {}", external_id);
+            }
 
             // Execute in sandboxed environment.
             lua.load(lua_code)
