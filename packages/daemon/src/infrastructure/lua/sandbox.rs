@@ -53,6 +53,9 @@ pub fn sanitize_globals(lua: &Lua) -> LuaResult<()> {
 ///
 /// The aura's Lua code runs in this environment and cannot access dangerous functions
 /// or walk back to the real global environment.
+///
+/// Important: `waio` and `slint` are NOT copied here — they are registered separately
+/// by the caller (in both globals and env, so timer callbacks work correctly).
 pub fn create_restricted_env(lua: &Lua) -> LuaResult<LuaTable> {
     let globals = lua.globals();
     let env = lua.create_table()?;
@@ -75,7 +78,7 @@ pub fn create_restricted_env(lua: &Lua) -> LuaResult<LuaTable> {
     env.set("type", globals.get::<LuaFunction>("type")?)?;
     env.set("xpcall", globals.get::<LuaFunction>("xpcall")?)?;
 
-    // Safe libraries.
+    // Safe libraries (shared references from globals).
     env.set("table", globals.get::<LuaTable>("table")?)?;
     env.set("string", globals.get::<LuaTable>("string")?)?;
     env.set("math", globals.get::<LuaTable>("math")?)?;
@@ -84,6 +87,5 @@ pub fn create_restricted_env(lua: &Lua) -> LuaResult<LuaTable> {
     }
     env.set("print", globals.get::<LuaFunction>("print")?)?;
 
-    // `waio` table is registered by caller.
     Ok(env)
 }

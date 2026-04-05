@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,6 +9,7 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_socket_path(None)
     }
@@ -32,6 +31,7 @@ impl IpcServer {
         Self { socket_path }
     }
 
+    #[allow(dead_code)]
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }

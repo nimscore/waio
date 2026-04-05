@@ -3,7 +3,7 @@ use slint::platform::software_renderer::{
     MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel, SoftwareRenderer,
 };
 use slint::PhysicalSize;
-use slint_interpreter::{Compiler, ComponentDefinition, ComponentInstance, Value};
+use slint_interpreter::{Compiler, ComponentInstance, Value};
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
@@ -177,7 +177,7 @@ impl SlintRenderer {
             let env = lua::sandbox::create_restricted_env(&lua)
                 .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
-            // Register slint bridge in the restricted environment.
+            // Register slint bridge (sets in both globals and restricted env).
             lua::slint_bridge::register_slint_in_env(
                 &lua,
                 &env,
@@ -186,26 +186,26 @@ impl SlintRenderer {
             )
             .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
-            // Register waio.timer in the restricted environment.
+            // Register waio.timer — must be in BOTH globals (for timer callbacks)
+            // and restricted env (for initial Lua code execution).
             let timer_module = lua::timer::create_module(
                 &lua,
                 self.timer_registry.clone(),
                 external_id.to_string(),
             )?;
-            let waio_in_env: mlua::Table = if let Ok(t) = env.get("waio") {
+
+            // Add timer to globals waio table.
+            let waio_globals: mlua::Table = if let Ok(t) = lua.globals().get("waio") {
                 t
             } else {
                 let t = lua.create_table()?;
-                env.set("waio", &t)?;
+                lua.globals().set("waio", &t)?;
                 t
             };
-            waio_in_env.set("timer", timer_module)?;
+            waio_globals.set("timer", timer_module)?;
 
-            // Also register waio.time if not present.
-            if waio_in_env.get::<mlua::Value>("time").is_err() {
-                let time_module = lua::time::create_module(&lua)?;
-                waio_in_env.set("time", time_module)?;
-            }
+            // Copy waio (now with timer) to restricted env.
+            env.set("waio", waio_globals)?;
 
             // Execute in sandboxed environment.
             lua.load(lua_code)
@@ -663,53 +663,6 @@ impl SlintRenderer {
         }
 
         Ok(())
-    }
-
-    /// Send a pixel buffer to the Wayland surface.
-    #[allow(dead_code)]
-    fn send_to_wayland(
-        &self,
-        _pixels: &[Rgb565Pixel],
-        _width: u32,
-        _height: u32,
-    ) -> Result<()> {
-        // Deprecated — use render_composite_and_send instead.
-        Ok(())
-    }
-
-    /// Compile a single component from the Slint source code.
-    #[allow(dead_code)]
-    fn compile_single_component(
-        &self,
-        code: &str,
-        component_name: &str,
-    ) -> Result<ComponentDefinition> {
-        let compiler = Compiler::default();
-        let result = spin_on::spin_on(
-            compiler.build_from_source(code.to_string(), std::path::PathBuf::from("virtual.slint")),
-        );
-
-        for diag in result.diagnostics() {
-            match diag.level() {
-                slint_interpreter::DiagnosticLevel::Error => {
-                    error!("Slint compilation error: {}", diag)
-                }
-                slint_interpreter::DiagnosticLevel::Warning => {
-                    warn!("Slint compilation warning: {}", diag)
-                }
-                _ => info!("Slint compilation info: {}", diag),
-            }
-        }
-
-        let definition = result
-            .component(component_name)
-            .ok_or_else(|| WaioError::SlintCompilation(format!(
-                "Component '{}' not found. Available: {:?}",
-                component_name,
-                result.components().map(|c| c.name().to_string()).collect::<Vec<_>>()
-            )))?;
-
-        Ok(definition)
     }
 
     fn compile_slint(

@@ -27,58 +27,8 @@ pub fn get_property_from_store(aura_id: &str, property: &str) -> Option<String> 
     store.get(aura_id).and_then(|props| props.get(property).cloned())
 }
 
-pub fn register(lua: &Lua) -> LuaResult<()> {
-    let slint_table = lua.create_table()?;
-    slint_table.set(
-        "set_property",
-        lua.create_function(|_, (name, value): (String, String)| {
-            tracing::info!("slint.set_property({}, {}) - no queue", name, value);
-            Ok(())
-        })?,
-    )?;
-    slint_table.set(
-        "get_property",
-        lua.create_function(|_, _name: String| Ok(String::new()))?,
-    )?;
-    lua.globals().set("slint", slint_table)?;
-    Ok(())
-}
-
-/// Register `slint.set_property` and `slint.get_property` in the given environment table.
-pub fn register_with_queue(lua: &Lua, aura_id: String, queue: CommandQueue) -> LuaResult<()> {
-    let slint_table = lua.create_table()?;
-
-    let id_for_set = aura_id.clone();
-    let queue_for_set = queue.clone();
-
-    slint_table.set(
-        "set_property",
-        lua.create_function(move |_, (name, value): (String, String)| {
-            push_command(&queue_for_set, PropertyUpdate {
-                aura_id: id_for_set.clone(),
-                property: name.clone(),
-                value: value.clone(),
-            });
-            update_property_store(&id_for_set, &name, &value);
-            Ok(())
-        })?,
-    )?;
-
-    let id_for_get = aura_id.clone();
-    slint_table.set(
-        "get_property",
-        lua.create_function(move |_, name: String| -> LuaResult<String> {
-            Ok(get_property_from_store(&id_for_get, &name).unwrap_or_default())
-        })?,
-    )?;
-
-    // Set in globals — caller should also copy to restricted env.
-    lua.globals().set("slint", slint_table)?;
-    Ok(())
-}
-
-/// Register `slint` in the given restricted environment table.
-/// Call this after `register_with_queue` to make `slint` visible in the sandbox.
+/// Register `slint` in the given restricted environment table AND in globals.
+/// The callback executes in globals context, so slint must be available there too.
 pub fn register_slint_in_env(lua: &Lua, env: &LuaTable, aura_id: String, queue: CommandQueue) -> LuaResult<()> {
     let slint_table = lua.create_table()?;
 
@@ -106,6 +56,8 @@ pub fn register_slint_in_env(lua: &Lua, env: &LuaTable, aura_id: String, queue: 
         })?,
     )?;
 
-    env.set("slint", slint_table)?;
+    // Set in BOTH restricted env AND globals (callbacks run in globals context).
+    env.set("slint", &slint_table)?;
+    lua.globals().set("slint", slint_table)?;
     Ok(())
 }
