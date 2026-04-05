@@ -15,7 +15,8 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 use waio_shared::config::WaioConfig;
 use waio_shared::entity::{Aura, AuraFile};
@@ -25,6 +26,8 @@ use waio_shared::protocol::{
 
 pub enum IpcCommand {
     Request(JsonRpcRequest, tokio::sync::oneshot::Sender<JsonRpcResponse>),
+    WatchFile(std::path::PathBuf),
+    UnwatchFile(std::path::PathBuf),
 }
 
 pub struct AppState {
@@ -86,7 +89,12 @@ pub fn run() -> Result<()> {
         .insert(event_loop.handle())
         .expect("Failed to insert WaylandSource");
 
-    // 5. Set up IPC server on a separate thread.
+    // 5b. Create file watcher for hot-reload.
+    use crate::infrastructure::file_watcher::{FileWatcher, FileWatchEvent};
+    let (mut file_watcher, file_watch_rx) = FileWatcher::new()
+        .expect("Failed to create file watcher");
+
+    // 5c. Set up IPC server on a separate thread.
     let state = AppState::new();
     let auras = state.auras.clone();
     let renderer_for_ipc = renderer.clone();
@@ -138,6 +146,79 @@ pub fn run() -> Result<()> {
             )
             .expect("Failed to insert timer channel into event loop");
         info!("Timer channel inserted into event loop");
+    }
+
+    // 5c. Insert the file watcher channel into the calloop event loop.
+    {
+        let renderer_for_fw = renderer.clone();
+        let repo_for_fw = repo.clone();
+        let auras_for_fw = auras.clone();
+        let wl_state_ptr = &mut wl_state as *mut crate::infrastructure::wayland::WlState;
+        event_loop
+            .handle()
+            .insert_source(
+                file_watch_rx,
+                move |event, (), _shared_data| {
+                    if let smithay_client_toolkit::reexports::calloop::channel::Event::Msg(ev) = event {
+                        match ev {
+                            FileWatchEvent::Changed(path) => {
+                                // Find the aura by source_path.
+                                let aura_id = {
+                                    let Ok(auras) = auras_for_fw.lock() else { return };
+                                    let path_str = path.to_string_lossy().to_string();
+                                    auras.iter()
+                                        .find(|(_, a)| a.source_path.as_deref() == Some(path_str.as_str()))
+                                        .map(|(id, _)| id.clone())
+                                };
+                                if let Some(aura_id) = aura_id {
+                                    info!("Hot-reload: re-loading aura {} from {}", aura_id, path.display());
+                                    match std::fs::read_to_string(&path) {
+                                        Ok(content) => {
+                                            match waio_shared::entity::AuraFile::from_content(&content) {
+                                                Ok(af) => {
+                                                    let mut aura = af.to_aura();
+                                                    aura.source_path = Some(path.to_string_lossy().to_string());
+                                                    let wl_state = unsafe { &mut *wl_state_ptr };
+                                                    match renderer_for_fw.remove_aura(&aura_id) {
+                                                        Ok(_) => {},
+                                                        Err(e) => warn!("Hot-reload: failed to remove old aura: {}", e),
+                                                    }
+                                                    match renderer_for_fw.load_aura(&aura, &aura_id, wl_state) {
+                                                        Ok(_) => {
+                                                            if let Err(e) = repo_for_fw.save(&aura) {
+                                                                warn!("Hot-reload: failed to persist aura {}: {}", aura_id, e);
+                                                            }
+                                                            if let Ok(mut a) = auras_for_fw.lock() {
+                                                                a.insert(aura_id.clone(), aura);
+                                                            }
+                                                            info!("Hot-reload: aura {} updated", aura_id);
+                                                        }
+                                                        Err(e) => {
+                                                            error!("Hot-reload: failed to load aura {}: {}", aura_id, e);
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => error!("Hot-reload: failed to parse {}: {}", path.display(), e),
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // File likely deleted — unload the aura.
+                                            warn!("Hot-reload: source file gone, unloading aura {}", aura_id);
+                                            let _ = renderer_for_fw.remove_aura(&aura_id);
+                                            let _ = repo_for_fw.delete(&aura_id);
+                                            if let Ok(mut a) = auras_for_fw.lock() {
+                                                a.remove(&aura_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            .expect("Failed to insert file watcher channel into event loop");
+        info!("File watcher channel inserted into event loop");
     }
 
     info!("Waio Daemon running. Waiting for auras...");
@@ -205,7 +286,7 @@ pub fn run() -> Result<()> {
             tracing::warn!("Redraw error: {}", e);
         }
 
-        // Process IPC commands (load/unload auras).
+        // Process IPC commands (load/unload auras, file watch).
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 IpcCommand::Request(request, response_tx) => {
@@ -217,9 +298,22 @@ pub fn run() -> Result<()> {
                         repo_for_ipc.clone(),
                         &mut wl_state,
                         shutdown_for_handler.clone(),
+                        &tx,
                     );
                     debug!("IPC request completed");
                     let _ = response_tx.send(response);
+                }
+                IpcCommand::WatchFile(path) => {
+                    debug!("Starting file watch: {}", path.display());
+                    if let Err(e) = file_watcher.watch(&path) {
+                        warn!("Failed to watch {}: {}", path.display(), e);
+                    }
+                }
+                IpcCommand::UnwatchFile(path) => {
+                    debug!("Stopping file watch: {}", path.display());
+                    if let Err(e) = file_watcher.unwatch(&path) {
+                        warn!("Failed to unwatch {}: {}", path.display(), e);
+                    }
                 }
             }
         }
@@ -245,6 +339,7 @@ fn handle_request(
     repo: Arc<FileAuraRepository>,
     wl_state: &mut crate::infrastructure::wayland::WlState,
     shutdown_flag: Arc<AtomicBool>,
+    tx: &std::sync::mpsc::Sender<IpcCommand>,
 ) -> JsonRpcResponse {
     let method: Result<DaemonMethod, _> = serde_json::from_value(request.params.clone());
 
@@ -264,8 +359,8 @@ fn handle_request(
 
             let aura_file = match source.as_str() {
                 "file" => {
-                    let path = match path {
-                        Some(p) => p,
+                    let path = match &path {
+                        Some(p) => p.clone(),
                         None => {
                             return rpc_error(
                                 -32602,
@@ -298,7 +393,11 @@ fn handle_request(
 
             match aura_file {
                 Ok(aura_file) => {
-                    let aura = aura_file.to_aura();
+                    let mut aura = aura_file.to_aura();
+                    // Track source path for hot-reload.
+                    if source == "file" {
+                        aura.source_path = path.clone();
+                    }
                     // Canonical ID: from YAML meta.id (or requested_id if provided).
                     let aura_id = requested_id.unwrap_or_else(|| aura.id.clone());
 
@@ -318,6 +417,12 @@ fn handle_request(
                                 warn!("Failed to persist aura {}: {}", aura_id, e);
                             }
                             auras.insert(aura_id.clone(), aura);
+                            // Start watching the source file for hot-reload.
+                            if source == "file" {
+                                if let Some(ref p) = path {
+                                    let _ = tx.send(IpcCommand::WatchFile(std::path::PathBuf::from(p)));
+                                }
+                            }
                             rpc_success(
                                 serde_json::json!({ "status": "ok", "id": aura_id }),
                                 request.id,
@@ -346,6 +451,10 @@ fn handle_request(
 
             match renderer.remove_aura(&id) {
                 Ok(_) => {
+                    // Stop watching the source file.
+                    if let Some(ref source_path) = auras.get(&id).and_then(|a| a.source_path.clone()) {
+                        let _ = tx.send(IpcCommand::UnwatchFile(std::path::PathBuf::from(source_path)));
+                    }
                     // Remove from persistence.
                     if let Err(e) = repo.delete(&id) {
                         warn!("Failed to remove persisted aura {}: {}", id, e);
@@ -380,6 +489,7 @@ fn handle_request(
                 serde_json::json!({
                     "status": "running",
                     "version": "0.1.0",
+                    "protocol_version": waio_shared::protocol::PROTOCOL_VERSION,
                     "auras": auras_list
                 }),
                 request.id,
@@ -409,7 +519,11 @@ fn handle_request(
 
             match AuraFile::from_content(&content) {
                 Ok(aura_file) => {
-                    let aura = aura_file.to_aura();
+                    let mut aura = aura_file.to_aura();
+                    // Preserve source path from existing aura.
+                    if let Some(e) = auras.get(&id) {
+                        aura.source_path = e.source_path.clone();
+                    }
                     let _ = renderer.remove_aura(&id);
                     match renderer.load_aura(&aura, &id, wl_state) {
                         Ok(_) => {
@@ -437,11 +551,31 @@ fn handle_request(
 }
 
 fn init_logging(log_level: &str) {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(log_level));
+
+    // Try journald first; fall back to rolling file appender.
+    if let Ok(layer) = tracing_journald::layer() {
+        let _ = tracing_subscriber::registry()
+            .with(layer.with_filter(env_filter))
+            .try_init();
+        eprintln!("Logging to journald");
+        info!("Starting Waio Daemon...");
+        return;
+    }
+
+    // Fallback: rolling file appender.
+    let log_dir = dirs::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("waio/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "waio-daemon.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(log_level)),
-        )
+        .with_env_filter(env_filter)
+        .with_writer(non_blocking)
         .try_init();
+
     info!("Starting Waio Daemon...");
 }

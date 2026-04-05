@@ -44,6 +44,12 @@ pub struct Aura {
     /// If empty, falls back to single-component rendering.
     #[serde(default)]
     pub layers: Vec<AuraLayer>,
+    /// Permissions declared in the .wa file (e.g. timer, system_time, fs_read, http).
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// Original file path (if loaded from file). Used for hot-reload.
+    #[serde(default)]
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +106,8 @@ impl Aura {
             lua_code: None,
             config: AuraConfig::default(),
             layers: Vec::new(),
+            permissions: Vec::new(),
+            source_path: None,
         }
     }
 
@@ -123,6 +131,8 @@ impl Default for Aura {
             lua_code: None,
             config: AuraConfig::default(),
             layers: Vec::new(),
+            permissions: Vec::new(),
+            source_path: None,
         }
     }
 }

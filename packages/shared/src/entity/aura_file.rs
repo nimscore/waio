@@ -116,6 +116,8 @@ impl AuraFile {
                 output: self.config.output.clone(),
             },
             layers,
+            permissions: self.meta.permissions.clone(),
+            source_path: None,
         }
     }
 }

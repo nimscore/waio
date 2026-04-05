@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Current IPC protocol version. Increment on breaking changes.
+pub const PROTOCOL_VERSION: &str = "1.0.0";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,

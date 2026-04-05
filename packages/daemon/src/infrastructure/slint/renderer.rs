@@ -97,8 +97,7 @@ impl SlintRenderer {
     pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> (Self, Channel<TimerFire>) {
         let (timer_tx, timer_rx) = channel::channel::<TimerFire>();
         let timer_registry = TimerRegistry::new(timer_tx);
-        let lua = mlua::Lua::new();
-        lua::register_all(&lua).expect("Failed to register waio Lua modules");
+        let lua = lua::create_sandboxed_lua();
 
         let self_ = Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
@@ -170,25 +169,49 @@ impl SlintRenderer {
             surfaces.insert(external_id.to_string(), surface);
         }
 
-        // Run Lua code.
+        // Run Lua code in a restricted sandbox environment.
         if let Some(ref lua_code) = aura.lua_code {
             let lua = self.lua_state.borrow();
 
-            lua::slint_bridge::register_with_queue(
+            // Create restricted environment for this aura.
+            let env = lua::sandbox::create_restricted_env(&lua)
+                .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
+
+            // Register slint bridge in the restricted environment.
+            lua::slint_bridge::register_slint_in_env(
                 &lua,
+                &env,
                 external_id.to_string(),
                 self.command_queue.clone(),
             )
             .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
 
-            lua::register_timer_for_aura(
+            // Register waio.timer in the restricted environment.
+            let timer_module = lua::timer::create_module(
                 &lua,
                 self.timer_registry.clone(),
                 external_id.to_string(),
-            )
-            .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
+            )?;
+            let waio_in_env: mlua::Table = if let Ok(t) = env.get("waio") {
+                t
+            } else {
+                let t = lua.create_table()?;
+                env.set("waio", &t)?;
+                t
+            };
+            waio_in_env.set("timer", timer_module)?;
 
-            lua.load(lua_code).exec()
+            // Also register waio.time if not present.
+            if waio_in_env.get::<mlua::Value>("time").is_err() {
+                let time_module = lua::time::create_module(&lua)?;
+                waio_in_env.set("time", time_module)?;
+            }
+
+            // Execute in sandboxed environment.
+            lua.load(lua_code)
+                .set_name(&format!("aura:{}", external_id))
+                .set_environment(env)
+                .exec()
                 .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
             info!("Lua code executed for aura: {}", aura.id);
         }

@@ -1,0 +1,27 @@
+[Unit]
+Description=Waio Wayland Widget Daemon
+Documentation=https://github.com/waio/waio
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/waio-daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/waio %h/.local/share/waio
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=graphical-session.target
