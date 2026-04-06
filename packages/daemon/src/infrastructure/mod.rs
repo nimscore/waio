@@ -1,4 +1,4 @@
-pub mod repository;
-pub mod wayland;
-pub mod slint;
 pub mod lua;
+pub mod repository;
+pub mod slint;
+pub mod wayland;

@@ -30,7 +30,9 @@ pub struct AuraLayer {
     pub dynamic: bool,
 }
 
-fn default_layer_size() -> u32 { 1920 }
+fn default_layer_size() -> u32 {
+    1920
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Aura {
@@ -47,6 +49,10 @@ pub struct Aura {
     /// Permissions declared in the .wa file (e.g. timer, system_time, fs_read, http).
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Whitelist of allowed commands for exec permission.
+    /// Populated from AuraFile's exec_commands field.
+    #[serde(default)]
+    pub exec_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +71,9 @@ pub struct Size {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum LayerAnchor {
+    #[default]
     Top,
     Bottom,
     Left,
@@ -77,18 +84,20 @@ pub enum LayerAnchor {
     BottomRight,
 }
 
-impl LayerAnchor {
-    pub fn from_str(s: &str) -> Self {
+impl std::str::FromStr for LayerAnchor {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "top" => LayerAnchor::Top,
-            "bottom" => LayerAnchor::Bottom,
-            "left" => LayerAnchor::Left,
-            "right" => LayerAnchor::Right,
-            "top-left" | "topleft" => LayerAnchor::TopLeft,
-            "top-right" | "topright" => LayerAnchor::TopRight,
-            "bottom-left" | "bottomleft" => LayerAnchor::BottomLeft,
-            "bottom-right" | "bottomright" => LayerAnchor::BottomRight,
-            _ => LayerAnchor::Top,
+            "top" => Ok(LayerAnchor::Top),
+            "bottom" => Ok(LayerAnchor::Bottom),
+            "left" => Ok(LayerAnchor::Left),
+            "right" => Ok(LayerAnchor::Right),
+            "top-left" | "topleft" => Ok(LayerAnchor::TopLeft),
+            "top-right" | "topright" => Ok(LayerAnchor::TopRight),
+            "bottom-left" | "bottomleft" => Ok(LayerAnchor::BottomLeft),
+            "bottom-right" | "bottomright" => Ok(LayerAnchor::BottomRight),
+            _ => Ok(LayerAnchor::Top),
         }
     }
 }
@@ -104,6 +113,7 @@ impl Aura {
             config: AuraConfig::default(),
             layers: Vec::new(),
             permissions: Vec::new(),
+            exec_commands: Vec::new(),
         }
     }
 
@@ -128,6 +138,7 @@ impl Default for Aura {
             config: AuraConfig::default(),
             layers: Vec::new(),
             permissions: Vec::new(),
+            exec_commands: Vec::new(),
         }
     }
 }

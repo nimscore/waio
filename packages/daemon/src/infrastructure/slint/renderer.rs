@@ -7,22 +7,26 @@ use slint_interpreter::{Compiler, ComponentInstance, Value};
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
+use smithay_client_toolkit::seat::pointer::PointerEventKind;
 use smithay_client_toolkit::shell::wlr_layer::{LayerSurface, LayerSurfaceConfigure};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use tracing::{error, info, warn};
 
 use crate::error::{Result, WaioError};
 use crate::infrastructure::lua;
+use crate::infrastructure::lua::input::InputRegistry;
+use crate::infrastructure::lua::rate_limiter::RateLimiter;
 use crate::infrastructure::lua::timer::{TimerFire, TimerRegistry};
-use smithay_client_toolkit::reexports::calloop::channel;
-use smithay_client_toolkit::reexports::calloop::channel::Channel;
 use crate::infrastructure::slint::aura_handle::{new_command_queue, CommandQueue};
+use crate::infrastructure::wayland::PointerState;
 use crate::infrastructure::wayland::{AuraSurface, WlState};
 #[allow(unused_imports)]
 use crate::usecase::render::Renderer;
+use smithay_client_toolkit::reexports::calloop::channel;
+use smithay_client_toolkit::reexports::calloop::channel::Channel;
 use waio_shared::entity::Aura;
 
 /// A single renderable layer (sub-window) within an aura.
@@ -86,27 +90,42 @@ pub struct SlintRenderer {
     timer_registry: TimerRegistry,
     /// Shared Lua state. Owned.
     lua_state: Rc<RefCell<mlua::Lua>>,
+    /// Shared rate limiter for Lua module calls.
+    rate_limiter: RateLimiter,
     /// Command queue for Lua → Slint property updates.
     command_queue: CommandQueue,
     /// Wayland resources needed for surface creation.
     compositor: CompositorState,
     qh: QueueHandle<WlState>,
+    /// Shared pointer state from WlState, used to dispatch pointer events to Slint windows.
+    pointer_state: Arc<Mutex<PointerState>>,
+    /// Shared input callbacks registry, used to trigger Lua callbacks on pointer events.
+    input_registry: InputRegistry,
 }
 
 impl SlintRenderer {
-    pub fn new(compositor: CompositorState, qh: QueueHandle<WlState>) -> (Self, Channel<TimerFire>) {
+    pub fn new(
+        compositor: CompositorState,
+        qh: QueueHandle<WlState>,
+        pointer_state: Arc<Mutex<PointerState>>,
+    ) -> (Self, Channel<TimerFire>) {
         let (timer_tx, timer_rx) = channel::channel::<TimerFire>();
         let timer_registry = TimerRegistry::new(timer_tx);
         let lua = lua::create_sandboxed_lua();
+        let input_registry = InputRegistry::new();
+        let rate_limiter = RateLimiter::new();
 
         let self_ = Self {
             render_states: Rc::new(RefCell::new(HashMap::new())),
             surfaces: Rc::new(RefCell::new(HashMap::new())),
             timer_registry,
             lua_state: Rc::new(RefCell::new(lua)),
+            rate_limiter,
             command_queue: new_command_queue(),
             compositor,
             qh,
+            pointer_state,
+            input_registry,
         };
         (self_, timer_rx)
     }
@@ -114,12 +133,7 @@ impl SlintRenderer {
     // ─── Aura lifecycle ───
 
     /// Load an aura: compile Slint, create SubWindows, create Wayland surface, run Lua.
-    pub fn load_aura(
-        &self,
-        aura: &Aura,
-        external_id: &str,
-        wl_state: &mut WlState,
-    ) -> Result<()> {
+    pub fn load_aura(&self, aura: &Aura, external_id: &str, wl_state: &mut WlState) -> Result<()> {
         info!("Loading aura: {} (id={})", aura.name, external_id);
 
         // Parse sub-components from Slint code.
@@ -216,7 +230,8 @@ impl SlintRenderer {
                     std::path::PathBuf::from("/proc"),
                     std::path::PathBuf::from("/sys"),
                 ]);
-                let fs_module = lua::fs::create_module(&lua, fs_access)?;
+                let fs_module =
+                    lua::fs::create_module(&lua, fs_access, Some(self.rate_limiter.clone()))?;
                 waio_globals.set("fs", fs_module)?;
                 info!("Registered waio.fs for aura: {}", external_id);
             }
@@ -224,14 +239,81 @@ impl SlintRenderer {
             // Register waio.http if the aura has http permission.
             if aura.permissions.iter().any(|p| p == "http") {
                 let http_access = lua::http::HttpAccess::new(vec![]);
-                let http_module = lua::http::create_module(&lua, http_access)?;
+                let http_module =
+                    lua::http::create_module(&lua, http_access, Some(self.rate_limiter.clone()))?;
                 waio_globals.set("http", http_module)?;
                 info!("Registered waio.http for aura: {}", external_id);
             }
 
+            // Register waio.notify, waio.backlight, waio.power, waio.audio if the aura has system permission.
+            if aura.permissions.iter().any(|p| p == "system") {
+                let notify_module =
+                    lua::notify::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("notify", notify_module)?;
+                info!("Registered waio.notify for aura: {}", external_id);
+
+                let backlight_module =
+                    lua::backlight::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("backlight", backlight_module)?;
+                info!("Registered waio.backlight for aura: {}", external_id);
+
+                let power_module =
+                    lua::power::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("power", power_module)?;
+                info!("Registered waio.power for aura: {}", external_id);
+
+                let audio_module =
+                    lua::audio::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("audio", audio_module)?;
+                info!("Registered waio.audio for aura: {}", external_id);
+
+                let bluetooth_module =
+                    lua::bluetooth::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("bluetooth", bluetooth_module)?;
+                info!("Registered waio.bluetooth for aura: {}", external_id);
+            }
+
+            // Register waio.input if the aura has input permission.
+            if aura.permissions.iter().any(|p| p == "input") {
+                let input_module = lua::input::create_module(
+                    &lua,
+                    self.input_registry.clone(),
+                    external_id.to_string(),
+                )?;
+                waio_globals.set("input", input_module)?;
+                info!("Registered waio.input for aura: {}", external_id);
+            }
+
+            // Register waio.exec if the aura has exec permission.
+            if aura.permissions.iter().any(|p| p == "exec") {
+                let exec_access = lua::exec::ExecAccess::new(aura.exec_commands.clone());
+                let exec_module =
+                    lua::exec::create_module(&lua, exec_access, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("exec", exec_module)?;
+                if aura.exec_commands.is_empty() {
+                    warn!(
+                        "Registered waio.exec with no command whitelist for aura: {} — all commands allowed",
+                        external_id
+                    );
+                } else {
+                    info!(
+                        "Registered waio.exec for aura: {} with {} allowed commands",
+                        external_id,
+                        aura.exec_commands.len()
+                    );
+                }
+            }
+
+            // Register waio.wifi if the aura has network permission.
+            if aura.permissions.iter().any(|p| p == "network") {
+                let wifi_module = lua::wifi::create_module(&lua, Some(self.rate_limiter.clone()))?;
+                waio_globals.set("wifi", wifi_module)?;
+                info!("Registered waio.wifi for aura: {}", external_id);
+            }
+
             // Execute in sandboxed environment.
             lua.load(lua_code)
-                .set_name(&format!("aura:{}", external_id))
+                .set_name(format!("aura:{}", external_id))
                 .set_environment(env)
                 .exec()
                 .map_err(|e| WaioError::Lua(mlua::Error::external(e)))?;
@@ -254,9 +336,10 @@ impl SlintRenderer {
     ) -> Result<()> {
         // Compile the full Slint code ONCE.
         let compiler = Compiler::default();
-        let result = spin_on::spin_on(
-            compiler.build_from_source(aura.slint_code.clone(), std::path::PathBuf::from("virtual.slint")),
-        );
+        let result = spin_on::spin_on(compiler.build_from_source(
+            aura.slint_code.clone(),
+            std::path::PathBuf::from("virtual.slint"),
+        ));
 
         for diag in result.diagnostics() {
             match diag.level() {
@@ -274,11 +357,9 @@ impl SlintRenderer {
 
         for layer in &aura.layers {
             // Get the component definition from the already-compiled result.
-            let comp_def = result
-                .component(&layer.name)
-                .ok_or_else(|| WaioError::SlintCompilation(format!(
-                    "Component '{}' not found", layer.name
-                )))?;
+            let comp_def = result.component(&layer.name).ok_or_else(|| {
+                WaioError::SlintCompilation(format!("Component '{}' not found", layer.name))
+            })?;
 
             info!("Using component: {} ({}x{})", layer.name, layer.w, layer.h);
 
@@ -475,7 +556,10 @@ impl SlintRenderer {
                                 Value::String(slint::SharedString::from(cmd.value.clone())),
                             ) {
                                 Ok(_) => modified_auras.push(cmd.aura_id.clone()),
-                                Err(e) => warn!("Failed to set property {}.{}: {}", layer_name, prop_name, e),
+                                Err(e) => warn!(
+                                    "Failed to set property {}.{}: {}",
+                                    layer_name, prop_name, e
+                                ),
                             }
                             break;
                         }
@@ -556,9 +640,159 @@ impl SlintRenderer {
         Ok(())
     }
 
+    // ─── Pointer event dispatch ───
+
+    /// Dispatch pending pointer events from `PointerState` to the appropriate Slint windows.
+    ///
+    /// For each pending event, determines which aura surface contains the pointer coordinates,
+    /// then forwards the event as a Slint `WindowEvent`:
+    /// - **Multi-layer auras**: performs AABB hit-testing against sub-windows; topmost layer wins.
+    /// - **Single-component auras**: forwards directly to `main_window`.
+    ///
+    /// Coordinates are in logical pixels (scale_factor = 1.0 assumed).
+    pub fn dispatch_pointer_events(&self) {
+        // Take pending events from the shared pointer state.
+        let events = {
+            let mut ps = match self.pointer_state.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    warn!("Failed to lock pointer state: {}", e);
+                    return;
+                }
+            };
+            std::mem::take(&mut ps.events)
+        };
+
+        if events.is_empty() {
+            return;
+        }
+
+        let render_states = self.render_states.borrow();
+        let surfaces = self.surfaces.borrow();
+
+        for event in &events {
+            let (px, py) = event.position;
+            let logical_x = px as f32;
+            let logical_y = py as f32;
+            let logical_pos = slint::LogicalPosition::new(logical_x, logical_y);
+
+            // Find the aura whose surface matches the event's surface.
+            let aura_id = match surfaces
+                .iter()
+                .find(|(_, s)| s.surface().is_some_and(|ws| *ws == event.surface))
+            {
+                Some((id, _)) => id.clone(),
+                None => continue, // Event for unknown surface.
+            };
+
+            let Some(state) = render_states.get(&aura_id) else {
+                continue;
+            };
+
+            // Determine which window to dispatch to.
+            let target_window = if !state.sub_windows.is_empty() {
+                // Multi-layer: AABB hit-test, topmost layer wins.
+                find_topmost_subwindow(&state.sub_windows, logical_x, logical_y)
+            } else {
+                // Single-component mode.
+                state.main_window.clone()
+            };
+
+            let Some(window) = target_window else {
+                continue;
+            };
+
+            // Convert the Wayland pointer event kind to a Slint WindowEvent.
+            let slint_event = match &event.kind {
+                PointerEventKind::Motion { .. } => {
+                    Some(slint::platform::WindowEvent::PointerMoved {
+                        position: logical_pos,
+                    })
+                }
+                PointerEventKind::Press { button, .. } => {
+                    Some(slint::platform::WindowEvent::PointerPressed {
+                        position: logical_pos,
+                        button: wayland_button_to_slint(*button),
+                    })
+                }
+                PointerEventKind::Release { button, .. } => {
+                    Some(slint::platform::WindowEvent::PointerReleased {
+                        position: logical_pos,
+                        button: wayland_button_to_slint(*button),
+                    })
+                }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => Some(slint::platform::WindowEvent::PointerScrolled {
+                    position: logical_pos,
+                    delta_x: horizontal.absolute as f32,
+                    delta_y: vertical.absolute as f32,
+                }),
+                PointerEventKind::Enter { .. } | PointerEventKind::Leave { .. } => {
+                    // Enter/Leave are handled by surface tracking; no Slint event needed.
+                    None
+                }
+            };
+
+            if let Some(evt) = slint_event {
+                if let Err(e) = window.try_dispatch_event(evt) {
+                    warn!(
+                        "Failed to dispatch pointer event to aura '{}': {}",
+                        aura_id, e
+                    );
+                }
+            }
+
+            // Trigger Lua input callbacks.
+            match &event.kind {
+                PointerEventKind::Press { button, .. } => {
+                    // Use the topmost sub-window name as component_name.
+                    let component_name = if !state.sub_windows.is_empty() {
+                        find_topmost_subwindow_name(&state.sub_windows, logical_x, logical_y)
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        "main".to_string()
+                    };
+                    self.input_registry.trigger_on_click(
+                        &aura_id,
+                        *button,
+                        logical_x,
+                        logical_y,
+                        &component_name,
+                    );
+                }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => {
+                    self.input_registry.trigger_on_scroll(
+                        &aura_id,
+                        horizontal.absolute as f32,
+                        vertical.absolute as f32,
+                        logical_x,
+                        logical_y,
+                    );
+                }
+                PointerEventKind::Enter { .. } => {
+                    self.input_registry
+                        .trigger_on_hover(&aura_id, logical_x, logical_y, true);
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.input_registry
+                        .trigger_on_hover(&aura_id, logical_x, logical_y, false);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Remove an aura and all its resources.
     pub fn remove_aura(&self, aura_id: &str) -> Result<()> {
         self.timer_registry.cancel_all_for_aura(aura_id);
+        self.input_registry.clear_aura(aura_id);
 
         // Clear property store for this aura.
         crate::infrastructure::lua::slint_bridge::clear_property_store(aura_id);
@@ -605,16 +839,18 @@ impl SlintRenderer {
     fn render_aura_to_canvas(&self, aura_id: &str, is_first_frame: bool) -> Result<()> {
         {
             let render_states = self.render_states.borrow();
-            let state = render_states.get(aura_id).ok_or_else(|| {
-                WaioError::AuraNotFound(aura_id.to_string())
-            })?;
+            let state = render_states
+                .get(aura_id)
+                .ok_or_else(|| WaioError::AuraNotFound(aura_id.to_string()))?;
 
             if !state.sub_windows.is_empty() {
                 // Sub-component mode: render each layer, composite, send to Wayland.
-                self.render_composite_and_send(aura_id, &state, is_first_frame)?;
-            } else if let (Some(window), Some(component), Some(pixels)) =
-                (&state.main_window, &state.main_component, &state.main_pixels)
-            {
+                self.render_composite_and_send(aura_id, state, is_first_frame)?;
+            } else if let (Some(window), Some(component), Some(pixels)) = (
+                &state.main_window,
+                &state.main_component,
+                &state.main_pixels,
+            ) {
                 // Single-component mode.
                 render_single_to_canvas(window, component, pixels, state.width, state.height)?;
             }
@@ -670,7 +906,7 @@ impl SlintRenderer {
             let b = (pixel.0 & 0x1F) as u32;
             let idx = i * 4;
             if idx + 3 < canvas.len() {
-                canvas[idx + 0] = ((b << 3) | (b >> 2)) as u8; // B
+                canvas[idx] = ((b << 3) | (b >> 2)) as u8; // B
                 canvas[idx + 1] = ((g << 2) | (g >> 4)) as u8; // G
                 canvas[idx + 2] = ((r << 3) | (r >> 2)) as u8; // R
                 canvas[idx + 3] = 0xFF; // A
@@ -680,7 +916,8 @@ impl SlintRenderer {
         // Send the composited canvas to the Wayland surface.
         let mut surfaces = self.surfaces.borrow_mut();
         if let Some(surface) = surfaces.get_mut(aura_id) {
-            surface.draw_precomposited(&canvas)
+            surface
+                .draw_precomposited(&canvas)
                 .map_err(|e| WaioError::SlintRender(format!("draw_precomposited: {}", e)))?;
         }
 
@@ -713,14 +950,70 @@ impl SlintRenderer {
             .or_else(|| result.components().next())
             .ok_or_else(|| {
                 let names: Vec<_> = result.components().map(|c| c.name().to_string()).collect();
-                WaioError::SlintCompilation(format!(
-                    "No component found. Available: {:?}",
-                    names
-                ))
+                WaioError::SlintCompilation(format!("No component found. Available: {:?}", names))
             })?;
 
         Ok(definition)
     }
+}
+
+// ─── Pointer dispatch helpers ───
+
+/// Find the topmost sub-window that contains the given logical (x, y) coordinates.
+/// Layers are checked in order (last = topmost), so the last matching layer wins.
+fn find_topmost_subwindow(
+    sub_windows: &[SubWindow],
+    x: f32,
+    y: f32,
+) -> Option<Rc<MinimalSoftwareWindow>> {
+    // Iterate in reverse order so the topmost layer is checked first.
+    sub_windows.iter().rev().find_map(|sw| {
+        let left = sw.x as f32;
+        let top = sw.y as f32;
+        let right = (sw.x + sw.width) as f32;
+        let bottom = (sw.y + sw.height) as f32;
+
+        if x >= left && x < right && y >= top && y < bottom {
+            Some(sw.window.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Map Wayland button codes to Slint `PointerEventButton`.
+///
+/// Wayland button codes (from linux/input-event-codes.h):
+/// - BTN_LEFT    = 0x110 (272)
+/// - BTN_RIGHT   = 0x111 (273)
+/// - BTN_MIDDLE  = 0x112 (274)
+/// - BTN_SIDE    = 0x113 (275)  → Back
+/// - BTN_EXTRA   = 0x114 (276)  → Forward
+fn wayland_button_to_slint(button: u32) -> slint::platform::PointerEventButton {
+    match button {
+        0x110 => slint::platform::PointerEventButton::Left,
+        0x111 => slint::platform::PointerEventButton::Right,
+        0x112 => slint::platform::PointerEventButton::Middle,
+        0x113 => slint::platform::PointerEventButton::Back,
+        0x114 => slint::platform::PointerEventButton::Forward,
+        _ => slint::platform::PointerEventButton::Other,
+    }
+}
+
+/// Find the name of the topmost sub-window that contains the given logical (x, y).
+fn find_topmost_subwindow_name(sub_windows: &[SubWindow], x: f32, y: f32) -> Option<String> {
+    sub_windows.iter().rev().find_map(|sw| {
+        let left = sw.x as f32;
+        let top = sw.y as f32;
+        let right = (sw.x + sw.width) as f32;
+        let bottom = (sw.y + sw.height) as f32;
+
+        if x >= left && x < right && y >= top && y < bottom {
+            Some(sw.name.clone())
+        } else {
+            None
+        }
+    })
 }
 
 /// Render a single-component aura to the canvas.
@@ -740,7 +1033,7 @@ fn render_single_to_canvas(
 
     window.request_redraw();
     window.draw_if_needed(|renderer: &SoftwareRenderer| {
-        renderer.render(&mut *px, width as usize);
+        renderer.render(&mut px, width as usize);
     });
 
     // Note: conversion to ARGB8888 and sending to Wayland happens in surface.draw()
@@ -766,7 +1059,8 @@ fn blit_layer(
             let dst_idx = (dst_y + y) * final_stride + (dst_x + x);
             if dst_idx < final_buffer.len()
                 && src_idx < layer_pixels.len()
-                && layer_pixels[src_idx].0 != 0  // Skip black (transparent) pixels
+                && layer_pixels[src_idx].0 != 0
+            // Skip black (transparent) pixels
             {
                 final_buffer[dst_idx] = layer_pixels[src_idx];
             }
@@ -808,6 +1102,7 @@ impl crate::usecase::render::Renderer for SlintRenderer {
 
     fn shutdown(&self) -> Result<()> {
         self.timer_registry.cancel_all();
+        self.input_registry.clear_all();
 
         let mut surfaces = self.surfaces.borrow_mut();
         for (_, surface) in surfaces.iter_mut() {

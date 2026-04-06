@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use anyhow::Result;
-use waio_shared::protocol::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
+use std::path::PathBuf;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use waio_shared::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 pub struct IpcServer {
     socket_path: PathBuf,
@@ -22,10 +22,8 @@ impl IpcServer {
                 .join("waio.sock")
         });
 
-        if socket_path.exists() {
-            if !is_socket_in_use(&socket_path) {
-                let _ = std::fs::remove_file(&socket_path);
-            }
+        if socket_path.exists() && !is_socket_in_use(&socket_path) {
+            let _ = std::fs::remove_file(&socket_path);
         }
 
         Self { socket_path }
@@ -46,10 +44,7 @@ impl IpcServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.socket_path,
-                std::fs::Permissions::from_mode(0o600)
-            )?;
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         tracing::info!("IPC server listening on {}", self.socket_path.display());

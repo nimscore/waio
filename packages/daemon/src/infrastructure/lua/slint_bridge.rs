@@ -24,12 +24,19 @@ pub fn clear_property_store(aura_id: &str) {
 /// Get a property value for an aura.
 pub fn get_property_from_store(aura_id: &str, property: &str) -> Option<String> {
     let store = PROPERTY_STORE.read().unwrap_or_else(|e| e.into_inner());
-    store.get(aura_id).and_then(|props| props.get(property).cloned())
+    store
+        .get(aura_id)
+        .and_then(|props| props.get(property).cloned())
 }
 
 /// Register `slint` in the given restricted environment table AND in globals.
 /// The callback executes in globals context, so slint must be available there too.
-pub fn register_slint_in_env(lua: &Lua, env: &LuaTable, aura_id: String, queue: CommandQueue) -> LuaResult<()> {
+pub fn register_slint_in_env(
+    lua: &Lua,
+    env: &LuaTable,
+    aura_id: String,
+    queue: CommandQueue,
+) -> LuaResult<()> {
     let slint_table = lua.create_table()?;
 
     let id_for_set = aura_id.clone();
@@ -38,11 +45,14 @@ pub fn register_slint_in_env(lua: &Lua, env: &LuaTable, aura_id: String, queue: 
     slint_table.set(
         "set_property",
         lua.create_function(move |_, (name, value): (String, String)| {
-            push_command(&queue_for_set, PropertyUpdate {
-                aura_id: id_for_set.clone(),
-                property: name.clone(),
-                value: value.clone(),
-            });
+            push_command(
+                &queue_for_set,
+                PropertyUpdate {
+                    aura_id: id_for_set.clone(),
+                    property: name.clone(),
+                    value: value.clone(),
+                },
+            );
             update_property_store(&id_for_set, &name, &value);
             Ok(())
         })?,
@@ -85,8 +95,14 @@ mod tests {
     fn test_aura_isolation() {
         update_property_store("aura-1", "shared_prop", "value1");
         update_property_store("aura-2", "shared_prop", "value2");
-        assert_eq!(get_property_from_store("aura-1", "shared_prop"), Some("value1".to_string()));
-        assert_eq!(get_property_from_store("aura-2", "shared_prop"), Some("value2".to_string()));
+        assert_eq!(
+            get_property_from_store("aura-1", "shared_prop"),
+            Some("value1".to_string())
+        );
+        assert_eq!(
+            get_property_from_store("aura-2", "shared_prop"),
+            Some("value2".to_string())
+        );
     }
 
     #[test]

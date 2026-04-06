@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::entity::{Aura, AuraConfig, AuraLayer, AuraType, LayerAnchor, Size};
+use crate::entity::{Aura, AuraConfig, AuraLayer, AuraType, Size};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuraFile {
@@ -22,6 +22,11 @@ pub struct AuraMeta {
     pub description: String,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Optional whitelist of allowed commands for exec permission.
+    /// If present and `exec` is in permissions, only these commands are allowed.
+    /// If `exec` is in permissions but this is empty, all commands are allowed.
+    #[serde(default)]
+    pub exec_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -95,9 +100,7 @@ impl AuraFile {
         let layers = self
             .layout
             .as_ref()
-            .and_then(|l| {
-                parse_layers_yaml(l).ok()
-            })
+            .and_then(|l| parse_layers_yaml(l).ok())
             .unwrap_or_default();
 
         Aura {
@@ -107,7 +110,7 @@ impl AuraFile {
             slint_code: self.slint_code.clone(),
             lua_code: Some(self.lua_code.clone()),
             config: AuraConfig {
-                anchor: LayerAnchor::from_str(&self.config.anchor),
+                anchor: self.config.anchor.parse().unwrap_or_default(),
                 size: Size {
                     width: self.config.width,
                     height: self.config.height,
@@ -117,6 +120,7 @@ impl AuraFile {
             },
             layers,
             permissions: self.meta.permissions.clone(),
+            exec_commands: self.meta.exec_commands.clone(),
         }
     }
 }
@@ -160,7 +164,14 @@ fn parse_layers_yaml(layout: &str) -> anyhow::Result<Vec<AuraLayer>> {
                 }
             }
 
-            layers.push(AuraLayer { name, x, y, w: layer_w, h: layer_h, dynamic });
+            layers.push(AuraLayer {
+                name,
+                x,
+                y,
+                w: layer_w,
+                h: layer_h,
+                dynamic,
+            });
         }
     }
 

@@ -96,10 +96,8 @@ mod tests {
     use mlua::StdLib;
 
     fn make_sandbox() -> Lua {
-        let lua = Lua::new_with(
-            StdLib::ALL_SAFE,
-            LuaOptions::new().catch_rust_panics(true),
-        ).unwrap();
+        let lua =
+            Lua::new_with(StdLib::ALL_SAFE, LuaOptions::new().catch_rust_panics(true)).unwrap();
         sanitize_globals(&lua).unwrap();
         lua
     }

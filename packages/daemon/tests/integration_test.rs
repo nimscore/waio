@@ -164,6 +164,9 @@ print("test")
 
         let af = AuraFile::from_content(content).expect("Failed to parse");
         let aura = af.to_aura();
-        assert_eq!(aura.permissions, vec!["timer", "system_time", "fs_read", "http"]);
+        assert_eq!(
+            aura.permissions,
+            vec!["timer", "system_time", "fs_read", "http"]
+        );
     }
 }

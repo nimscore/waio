@@ -65,7 +65,10 @@ impl TimerRegistry {
                 }
             }
             None => {
-                debug!("Timer {} callback not found (already cancelled?)", fire.timer_id);
+                debug!(
+                    "Timer {} callback not found (already cancelled?)",
+                    fire.timer_id
+                );
             }
         }
     }
@@ -83,7 +86,10 @@ impl TimerRegistry {
             cbs.insert(id, cb);
         }
 
-        let timer = ActiveTimer { id, stop_flag: stop_flag.clone() };
+        let timer = ActiveTimer {
+            id,
+            stop_flag: stop_flag.clone(),
+        };
         {
             let mut timers = Self::lock(&self.timers, "request_interval_timers");
             timers.insert(id, timer);
@@ -102,7 +108,13 @@ impl TimerRegistry {
                 if stop_for_thread.load(Ordering::Relaxed) {
                     break;
                 }
-                if tx.send(TimerFire { timer_id: id, aura_id: fire_aura.clone() }).is_err() {
+                if tx
+                    .send(TimerFire {
+                        timer_id: id,
+                        aura_id: fire_aura.clone(),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -123,7 +135,10 @@ impl TimerRegistry {
             cbs.insert(id, cb);
         }
 
-        let timer = ActiveTimer { id, stop_flag: stop_flag.clone() };
+        let timer = ActiveTimer {
+            id,
+            stop_flag: stop_flag.clone(),
+        };
         {
             let mut timers = Self::lock(&self.timers, "request_timeout_timers");
             timers.insert(id, timer);
@@ -137,10 +152,15 @@ impl TimerRegistry {
 
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(ms as u64));
-            if !stop_for_thread.load(Ordering::Relaxed) {
-                if tx.send(TimerFire { timer_id: id, aura_id: fire_aura }).is_err() {
-                    debug!("Timer {} send failed — channel disconnected", id);
-                }
+            if !stop_for_thread.load(Ordering::Relaxed)
+                && tx
+                    .send(TimerFire {
+                        timer_id: id,
+                        aura_id: fire_aura,
+                    })
+                    .is_err()
+            {
+                debug!("Timer {} send failed — channel disconnected", id);
             }
         });
 
@@ -212,11 +232,7 @@ struct ActiveTimer {
 }
 
 /// Creates the Lua `waio.timer` module.
-pub fn create_module(
-    lua: &Lua,
-    registry: TimerRegistry,
-    aura_id: String,
-) -> LuaResult<LuaTable> {
+pub fn create_module(lua: &Lua, registry: TimerRegistry, aura_id: String) -> LuaResult<LuaTable> {
     let m = lua.create_table()?;
 
     let reg_for_interval = registry.clone();
@@ -242,9 +258,7 @@ pub fn create_module(
     let reg_for_cancel = registry;
     m.set(
         "cancel",
-        lua.create_function(move |_, id: u64| {
-            Ok(reg_for_cancel.cancel(id))
-        })?,
+        lua.create_function(move |_, id: u64| Ok(reg_for_cancel.cancel(id)))?,
     )?;
 
     Ok(m)
@@ -292,12 +306,17 @@ mod tests {
         let lua = mlua::Lua::new();
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = called.clone();
-        let cb = lua.create_function(move |_, ()| {
-            called_clone.store(true, Ordering::Relaxed);
-            Ok(())
-        }).unwrap();
+        let cb = lua
+            .create_function(move |_, ()| {
+                called_clone.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .unwrap();
         let id = reg.request_timeout_for_aura("test", 100, cb);
-        reg.process_single_fire(TimerFire { aura_id: "test".into(), timer_id: id });
+        reg.process_single_fire(TimerFire {
+            aura_id: "test".into(),
+            timer_id: id,
+        });
         assert!(called.load(Ordering::Relaxed));
     }
 

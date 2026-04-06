@@ -93,7 +93,7 @@ pub fn rpc_error(code: i32, message: &str, data: Option<String>, id: u64) -> Jso
         error: Some(JsonRpcError {
             code,
             message: message.to_string(),
-            data: data.map(String::from),
+            data,
         }),
         id,
     }

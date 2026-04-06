@@ -1,7 +1,7 @@
 use anyhow::Result;
 use smithay_client_toolkit::compositor::CompositorState;
-use smithay_client_toolkit::reexports::client::protocol::wl_shm;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::WlOutput;
+use smithay_client_toolkit::reexports::client::protocol::wl_shm;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::QueueHandle;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -95,7 +95,7 @@ impl AuraSurface {
         let anchor = Self::anchor_to_bits(&config.anchor);
         layer_surface.set_anchor(anchor);
         layer_surface.set_size(config.size.width, config.size.height);
-        layer_surface.set_exclusive_zone(config.exclusive_zone as i32);
+        layer_surface.set_exclusive_zone(config.exclusive_zone);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
 
         // Initial commit WITHOUT buffer — signals readiness to receive configure.
@@ -310,12 +310,16 @@ impl AuraSurface {
     pub fn draw_precomposited(&mut self, canvas: &[u8]) -> Result<()> {
         let (w, h) = match &self.state {
             SurfaceState::Rendering { current_size, .. } => *current_size,
-            SurfaceState::Configured { configured_size, .. } => *configured_size,
+            SurfaceState::Configured {
+                configured_size, ..
+            } => *configured_size,
             _ => return Err(anyhow::anyhow!("Surface not in renderable state")),
         };
 
         let stride = w as i32 * 4;
-        let (buffer, slot_canvas) = self.pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?;
+        let (buffer, slot_canvas) =
+            self.pool
+                .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?;
 
         // Copy the pre-composited canvas into the buffer.
         let copy_len = canvas.len().min(slot_canvas.len());
@@ -332,8 +336,11 @@ impl AuraSurface {
 
         // Transition to Rendering state if we were in Configured.
         if matches!(self.state, SurfaceState::Configured { .. }) {
-            if let SurfaceState::Configured { surface, layer_surface, configured_size } =
-                std::mem::replace(&mut self.state, SurfaceState::Closed)
+            if let SurfaceState::Configured {
+                surface,
+                layer_surface,
+                configured_size,
+            } = std::mem::replace(&mut self.state, SurfaceState::Closed)
             {
                 self.state = SurfaceState::Rendering {
                     surface,
@@ -344,7 +351,12 @@ impl AuraSurface {
             }
         }
 
-        tracing::debug!("AuraSurface {} precomposited frame sent: {}x{}", self.id, w, h);
+        tracing::debug!(
+            "AuraSurface {} precomposited frame sent: {}x{}",
+            self.id,
+            w,
+            h
+        );
 
         Ok(())
     }
@@ -356,7 +368,9 @@ impl AuraSurface {
         F: FnOnce(&mut [u8], u32, u32),
     {
         let stride = w as i32 * 4;
-        let (buffer, canvas) = self.pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?;
+        let (buffer, canvas) =
+            self.pool
+                .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?;
 
         tracing::debug!(
             "AuraSurface {} drawing: {}x{}, stride={}, canvas={} bytes",

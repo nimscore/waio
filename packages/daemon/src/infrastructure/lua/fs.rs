@@ -7,6 +7,8 @@ use mlua::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::rate_limiter::RateLimiter;
+
 /// Allowed root directories for read-only file access.
 #[derive(Clone)]
 pub struct FsAccess {
@@ -67,23 +69,39 @@ impl FsAccess {
 }
 
 /// Create the `waio.fs` Lua module with `read_file(path)` and `list_dir(path)`.
-pub fn create_module(lua: &Lua, fs_access: FsAccess) -> LuaResult<LuaTable> {
+pub fn create_module(
+    lua: &Lua,
+    fs_access: FsAccess,
+    rate_limiter: Option<RateLimiter>,
+) -> LuaResult<LuaTable> {
     let m = lua.create_table()?;
 
     let fs_for_read = fs_access.clone();
+    let rl_for_read = rate_limiter.clone();
     m.set(
         "read_file",
         lua.create_function(move |_, path: String| -> LuaResult<String> {
-            fs_for_read.read_file(&path)
+            if let Some(ref rl) = rl_for_read {
+                rl.check_and_record("fs_read")
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+            }
+            fs_for_read
+                .read_file(&path)
                 .map_err(|e| mlua::Error::external(e.to_string()))
         })?,
     )?;
 
     let fs_for_list = fs_access;
+    let rl_for_list = rate_limiter;
     m.set(
         "list_dir",
         lua.create_function(move |_, path: String| -> LuaResult<Vec<String>> {
-            fs_for_list.list_dir(&path)
+            if let Some(ref rl) = rl_for_list {
+                rl.check_and_record("fs_read")
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+            }
+            fs_for_list
+                .list_dir(&path)
                 .map_err(|e| mlua::Error::external(e.to_string()))
         })?,
     )?;

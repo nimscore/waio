@@ -1,7 +1,7 @@
 use std::path::PathBuf;
-use tokio::net::UnixStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use waio_shared::protocol::{JsonRpcRequest, JsonRpcResponse, DaemonMethod};
+use tokio::net::UnixStream;
+use waio_shared::protocol::{DaemonMethod, JsonRpcRequest, JsonRpcResponse};
 
 pub struct IpcClient {
     socket_path: PathBuf,
@@ -14,7 +14,10 @@ impl IpcClient {
         }
     }
 
-    pub async fn send(&self, method: DaemonMethod) -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
+    pub async fn send(
+        &self,
+        method: DaemonMethod,
+    ) -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
 
         let request = JsonRpcRequest {
@@ -25,7 +28,8 @@ impl IpcClient {
                 DaemonMethod::UpdateAura { .. } => "aura.update",
                 DaemonMethod::SystemStatus => "system.status",
                 DaemonMethod::SystemShutdown => "system.shutdown",
-            }.to_string(),
+            }
+            .to_string(),
             params: serde_json::to_value(&method)?,
             id: 1,
         };
@@ -36,10 +40,10 @@ impl IpcClient {
 
         let mut reader = BufReader::new(stream);
         let mut response_line = String::new();
-        
+
         use tokio::time::{timeout, Duration};
         let result = timeout(Duration::from_secs(5), reader.read_line(&mut response_line)).await;
-        
+
         match result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(Box::new(e)),

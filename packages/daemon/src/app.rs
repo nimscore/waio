@@ -21,11 +21,14 @@ use tracing_subscriber::EnvFilter;
 use waio_shared::config::WaioConfig;
 use waio_shared::entity::{Aura, AuraFile};
 use waio_shared::protocol::{
-    DaemonMethod, JsonRpcRequest, JsonRpcResponse, error_codes, rpc_error, rpc_success,
+    error_codes, rpc_error, rpc_success, DaemonMethod, JsonRpcRequest, JsonRpcResponse,
 };
 
 pub enum IpcCommand {
-    Request(JsonRpcRequest, tokio::sync::oneshot::Sender<JsonRpcResponse>),
+    Request(
+        JsonRpcRequest,
+        tokio::sync::oneshot::Sender<JsonRpcResponse>,
+    ),
 }
 
 pub struct AppState {
@@ -44,13 +47,16 @@ impl AppState {
 /// IPC server, and runs the dispatch loop.
 pub fn run() -> Result<()> {
     // Load configuration: WAIO_CONFIG env → ~/.config/waio/config.yaml → create default
-    let config = WaioConfig::load()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    let config = WaioConfig::load().map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     config.validate();
 
     init_logging(&config.log_level());
 
-    info!("Config loaded: socket={}, data_dir={}", config.socket_path(), config.data_dir());
+    info!(
+        "Config loaded: socket={}, data_dir={}",
+        config.socket_path(),
+        config.data_dir()
+    );
 
     if std::env::var("WAYLAND_DISPLAY").is_err() {
         anyhow::bail!(
@@ -63,9 +69,11 @@ pub fn run() -> Result<()> {
 
     // 2. Create the Slint renderer — it owns compositor and qh.
     //    LayerShell and Shm remain in WlState and are borrowed during load_aura.
+    let pointer_state_for_renderer = wl_state.pointer_state.clone();
     let (renderer, timer_channel) = SlintRenderer::new(
         wl_state.compositor_state.clone(),
         wl_conn.qh.clone(),
+        pointer_state_for_renderer,
     );
     let renderer = Rc::new(renderer);
 
@@ -130,14 +138,12 @@ pub fn run() -> Result<()> {
         let renderer_for_timer = renderer.clone();
         event_loop
             .handle()
-            .insert_source(
-                timer_channel,
-                move |event, (), _shared_data| {
-                    if let smithay_client_toolkit::reexports::calloop::channel::Event::Msg(fire) = event {
-                        renderer_for_timer.process_single_timer_fire(fire);
-                    }
-                },
-            )
+            .insert_source(timer_channel, move |event, (), _shared_data| {
+                if let smithay_client_toolkit::reexports::calloop::channel::Event::Msg(fire) = event
+                {
+                    renderer_for_timer.process_single_timer_fire(fire);
+                }
+            })
             .expect("Failed to insert timer channel into event loop");
         info!("Timer channel inserted into event loop");
     }
@@ -150,7 +156,11 @@ pub fn run() -> Result<()> {
         Ok(saved_auras) => {
             for aura in saved_auras {
                 let aura_id = aura.id.clone();
-                if auras.lock().map(|a| a.contains_key(&aura_id)).unwrap_or(false) {
+                if auras
+                    .lock()
+                    .map(|a| a.contains_key(&aura_id))
+                    .unwrap_or(false)
+                {
                     warn!("Aura {} already in memory, skipping", aura_id);
                     continue;
                 }
@@ -226,7 +236,8 @@ pub fn run() -> Result<()> {
     ctrlc::set_handler(move || {
         info!("Signal received, initiating graceful shutdown...");
         shutdown_for_sig.store(true, Ordering::Relaxed);
-    }).expect("Failed to set signal handler");
+    })
+    .expect("Failed to set signal handler");
 
     loop {
         // Dispatch Wayland events (configure, frame, closed, etc.).
@@ -257,6 +268,9 @@ pub fn run() -> Result<()> {
         if let Err(e) = renderer_for_ipc.redraw_all() {
             tracing::warn!("Redraw error: {}", e);
         }
+
+        // Dispatch pending pointer events from Wayland to Slint windows.
+        renderer_for_ipc.dispatch_pointer_events();
 
         // Process IPC commands (load/unload auras).
         while let Ok(cmd) = rx.try_recv() {
@@ -323,9 +337,7 @@ fn handle_request(
         }) => {
             let mut auras = match auras.lock() {
                 Ok(a) => a,
-                Err(e) => {
-                    return rpc_error(-32000, &e.to_string(), None::<String>, request.id)
-                }
+                Err(e) => return rpc_error(-32000, &e.to_string(), None::<String>, request.id),
             };
 
             let aura_file = match source.as_str() {
@@ -333,12 +345,7 @@ fn handle_request(
                     let path = match &path {
                         Some(p) => p.clone(),
                         None => {
-                            return rpc_error(
-                                -32602,
-                                "path required",
-                                None::<String>,
-                                request.id,
-                            )
+                            return rpc_error(-32602, "path required", None::<String>, request.id)
                         }
                     };
                     AuraFile::from_path(std::path::Path::new(&path))
@@ -357,9 +364,7 @@ fn handle_request(
                     };
                     AuraFile::from_content(&content)
                 }
-                _ => {
-                    return rpc_error(-32602, "Invalid source", None::<String>, request.id)
-                }
+                _ => return rpc_error(-32602, "Invalid source", None::<String>, request.id),
             };
 
             match aura_file {
@@ -389,9 +394,7 @@ fn handle_request(
                                 request.id,
                             )
                         }
-                        Err(e) => {
-                            rpc_error(-32000, &e.to_string(), None::<String>, request.id)
-                        }
+                        Err(e) => rpc_error(-32000, &e.to_string(), None::<String>, request.id),
                     }
                 }
                 Err(e) => rpc_error(-32001, &e.to_string(), None::<String>, request.id),
@@ -401,13 +404,16 @@ fn handle_request(
         Ok(DaemonMethod::UnloadAura { id }) => {
             let mut auras = match auras.lock() {
                 Ok(a) => a,
-                Err(e) => {
-                    return rpc_error(-32000, &e.to_string(), None::<String>, request.id)
-                }
+                Err(e) => return rpc_error(-32000, &e.to_string(), None::<String>, request.id),
             };
 
             if !auras.contains_key(&id) {
-                return rpc_error(error_codes::NOT_FOUND, "Aura not found", None::<String>, request.id);
+                return rpc_error(
+                    error_codes::NOT_FOUND,
+                    "Aura not found",
+                    None::<String>,
+                    request.id,
+                );
             }
 
             match renderer.remove_aura(&id) {
@@ -426,9 +432,7 @@ fn handle_request(
         Ok(DaemonMethod::SystemStatus) => {
             let auras = match auras.lock() {
                 Ok(a) => a,
-                Err(e) => {
-                    return rpc_error(-32000, &e.to_string(), None, request.id)
-                }
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
             };
 
             let auras_list: Vec<serde_json::Value> = auras
@@ -465,9 +469,7 @@ fn handle_request(
         Ok(DaemonMethod::UpdateAura { id, content }) => {
             let mut auras = match auras.lock() {
                 Ok(a) => a,
-                Err(e) => {
-                    return rpc_error(-32000, &e.to_string(), None, request.id)
-                }
+                Err(e) => return rpc_error(-32000, &e.to_string(), None, request.id),
             };
 
             if !auras.contains_key(&id) {
@@ -485,14 +487,9 @@ fn handle_request(
                                 warn!("Failed to persist updated aura {}: {}", id, e);
                             }
                             auras.insert(id.clone(), aura);
-                            rpc_success(
-                                serde_json::json!({ "status": "ok", "id": id }),
-                                request.id,
-                            )
+                            rpc_success(serde_json::json!({ "status": "ok", "id": id }), request.id)
                         }
-                        Err(e) => {
-                            rpc_error(-32000, &e.to_string(), None::<String>, request.id)
-                        }
+                        Err(e) => rpc_error(-32000, &e.to_string(), None::<String>, request.id),
                     }
                 }
                 Err(e) => rpc_error(-32001, &e.to_string(), None::<String>, request.id),
@@ -504,8 +501,8 @@ fn handle_request(
 }
 
 fn init_logging(log_level: &str) {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     // Try journald first; fall back to rolling file appender.
     if let Ok(layer) = tracing_journald::layer() {

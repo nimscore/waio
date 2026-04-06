@@ -41,13 +41,11 @@ impl AuraRepository for FileAuraRepository {
         let mut auras = Vec::new();
         let entries =
             fs::read_dir(&self.base_path).map_err(|e| AuraError::InvalidSyntax(e.to_string()))?;
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                    if let Ok(content) = fs::read_to_string(&entry.path()) {
-                        if let Ok(aura) = serde_json::from_str::<Aura>(&content) {
-                            auras.push(aura);
-                        }
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(content) = fs::read_to_string(entry.path()) {
+                    if let Ok(aura) = serde_json::from_str::<Aura>(&content) {
+                        auras.push(aura);
                     }
                 }
             }
@@ -70,12 +68,16 @@ mod tests {
             lua_code: Some("print('test')".into()),
             config: waio_shared::entity::AuraConfig {
                 anchor: LayerAnchor::Top,
-                size: Size { width: 1920, height: 40 },
+                size: Size {
+                    width: 1920,
+                    height: 40,
+                },
                 exclusive_zone: 40,
                 output: None,
             },
             layers: vec![],
             permissions: vec!["timer".into()],
+            exec_commands: vec![],
         }
     }
 
@@ -115,6 +117,9 @@ mod tests {
     fn test_get_not_found() {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = FileAuraRepository::new(temp_dir.path().to_path_buf());
-        assert!(matches!(repo.get("nonexistent"), Err(AuraError::NotFound(_))));
+        assert!(matches!(
+            repo.get("nonexistent"),
+            Err(AuraError::NotFound(_))
+        ));
     }
 }

@@ -47,7 +47,10 @@ async fn main() {
     let config = match waio_shared::config::WaioConfig::load() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("\x1b[33mWarning\x1b[0m: Could not load config, using defaults: {}", e);
+            eprintln!(
+                "\x1b[33mWarning\x1b[0m: Could not load config, using defaults: {}",
+                e
+            );
             waio_shared::config::WaioConfig::default()
         }
     };
@@ -65,11 +68,14 @@ async fn main() {
             client.send(method).await
         }
         Commands::Update { id, path } => {
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| {
-                    eprintln!("\x1b[31mError\x1b[0m: Failed to read {}: {}", path.display(), e);
-                    std::process::exit(1);
-                });
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                eprintln!(
+                    "\x1b[31mError\x1b[0m: Failed to read {}: {}",
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            });
             let method = DaemonMethod::UpdateAura { id, content };
             client.send(method).await
         }
@@ -96,9 +102,12 @@ async fn main() {
                 }
                 std::process::exit(1);
             }
-            
+
             if let Some(result) = resp.result {
-                println!("\x1b[32mSuccess\x1b[0m: {}", serde_json::to_string_pretty(&result).unwrap());
+                println!(
+                    "\x1b[32mSuccess\x1b[0m: {}",
+                    serde_json::to_string_pretty(&result).unwrap()
+                );
             }
         }
         Err(e) => {

@@ -20,7 +20,7 @@ log_level: "info,waio_daemon=debug"
 "#;
 
 /// Unified configuration for both daemon and CLI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WaioConfig {
     /// IPC socket path for daemon communication.
     #[serde(default)]
@@ -81,10 +81,7 @@ impl WaioConfig {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&config_path, DEFAULT_CONFIG_YAML)?;
-        eprintln!(
-            "Config file created at: {}",
-            config_path.display()
-        );
+        eprintln!("Config file created at: {}", config_path.display());
 
         Self::from_path(&config_path)
     }
@@ -92,14 +89,26 @@ impl WaioConfig {
     /// Validate config values. Warns and applies fallbacks for invalid values.
     pub fn validate(&self) {
         // Validate socket_path is not empty.
-        if self.socket_path.is_none() || self.socket_path.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
-            eprintln!("Warning: socket_path is empty, using default: {}", Self::default_socket_path());
+        if self.socket_path.is_none()
+            || self
+                .socket_path
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(false)
+        {
+            eprintln!(
+                "Warning: socket_path is empty, using default: {}",
+                Self::default_socket_path()
+            );
         }
 
         // Validate log_level can be parsed by EnvFilter.
         if let Some(ref level) = self.log_level {
             if level.is_empty() {
-                eprintln!("Warning: log_level is empty, using default: {}", Self::default_log_level());
+                eprintln!(
+                    "Warning: log_level is empty, using default: {}",
+                    Self::default_log_level()
+                );
             }
         }
 
@@ -107,13 +116,19 @@ impl WaioConfig {
         let data_dir = PathBuf::from(self.data_dir());
         if !data_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
-                eprintln!("Warning: cannot create data_dir {}: {}", data_dir.display(), e);
+                eprintln!(
+                    "Warning: cannot create data_dir {}: {}",
+                    data_dir.display(),
+                    e
+                );
             }
         }
     }
 
     /// Load config from a specific YAML file.
-    pub fn from_path(path: &std::path::Path) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_path(
+        path: &std::path::Path,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let config: Self = serde_yaml::from_str(&content)?;
         Ok(config)
@@ -121,31 +136,21 @@ impl WaioConfig {
 
     /// Resolved socket path (config value or system default).
     pub fn socket_path(&self) -> String {
-        self.socket_path.clone()
-            .unwrap_or_else(|| Self::default_socket_path())
+        self.socket_path
+            .clone()
+            .unwrap_or_else(Self::default_socket_path)
     }
 
     /// Resolved log level (config value or default).
     pub fn log_level(&self) -> String {
-        self.log_level.clone()
-            .unwrap_or_else(|| Self::default_log_level())
+        self.log_level
+            .clone()
+            .unwrap_or_else(Self::default_log_level)
     }
 
     /// Resolved data directory (config value or default).
     pub fn data_dir(&self) -> String {
-        self.data_dir.clone()
-            .unwrap_or_else(|| Self::default_data_dir())
-    }
-}
-
-impl Default for WaioConfig {
-    fn default() -> Self {
-        Self {
-            socket_path: None,
-            log_level: None,
-            data_dir: None,
-            default_output: None,
-        }
+        self.data_dir.clone().unwrap_or_else(Self::default_data_dir)
     }
 }
 
@@ -155,8 +160,8 @@ mod tests {
 
     #[test]
     fn test_default_config_parses() {
-        let config: WaioConfig = serde_yaml::from_str(DEFAULT_CONFIG_YAML)
-            .expect("Default config YAML should parse");
+        let config: WaioConfig =
+            serde_yaml::from_str(DEFAULT_CONFIG_YAML).expect("Default config YAML should parse");
         // Optional paths are null — resolved programmatically.
         assert!(config.socket_path.is_none());
         assert!(config.data_dir.is_none());
@@ -165,7 +170,8 @@ mod tests {
 
     #[test]
     fn test_empty_config_parses() {
-        let config: WaioConfig = serde_yaml::from_str("").expect("Empty config should parse with defaults");
+        let config: WaioConfig =
+            serde_yaml::from_str("").expect("Empty config should parse with defaults");
         assert!(config.socket_path.is_none());
         assert!(config.log_level.is_none());
         assert!(config.data_dir.is_none());

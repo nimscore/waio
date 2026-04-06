@@ -25,12 +25,10 @@
 
 <br>
 
-> [!WARNING]
+> [!NOTE]
 >
-> Waio is in **early alpha** and is **not ready** for daily use. APIs, file
-> formats, and architecture are subject to breaking changes without notice.
-> Crashes, rendering artifacts, and data loss are expected behavior at this
-> stage. Use at your own risk.
+> Waio is in **beta** — core features are stable, and the full Lua API
+> is available. APIs and file formats may still change. Use at your own risk.
 
 ## About
 
@@ -46,8 +44,8 @@ manages widgets through wlr-layer-shell and Wayland SHM buffers.
 
 **`waio-daemon`** is a background process that owns the Wayland connection,
 compiles Slint components at runtime, executes Lua scripts in a sandboxed
-environment with a permission system, and communicates via JSON-RPC over a
-Unix socket.
+environment with a permission system and rate limiting, and communicates
+via JSON-RPC over a Unix socket.
 
 **`waio-cli`** is the command-line interface for loading, unloading,
 updating, and inspecting widgets.
@@ -69,9 +67,15 @@ Binaries: `target/release/waio-daemon`, `target/release/waio-cli`.
 
 ## Documentation
 
-See the [documentation](https://github.com/nimscore/waio) (this repository) for
-getting started guides, `.wa` file format reference, and architecture
-details.
+### Getting Started
+- [Creating Your First Aura](docs/auras/README.md) — step-by-step guide (Russian)
+- [Aura File Format](docs/auras/file-format.md) — YAML + Slint + Layout + Lua
+- [Slint UI Guide](docs/auras/slint.md) — components, properties, layouts
+- [Lua API Reference](docs/auras/lua-api.md) — all `waio.*` modules
+
+### Architecture
+- [Clean Architecture](docs/clean-architecture.md) — project constitution
+- [QWEN.md](QWEN.md) — developer reference (full codebase details)
 
 ### Quick Start
 
@@ -85,6 +89,31 @@ target/release/waio-cli load examples/clock-bar/aura.wa
 
 The widget appears on your screen. Edit `examples/clock-bar/aura.wa` and
 use `waio-cli update` to reload it.
+
+## Lua API Overview
+
+Waio provides a rich Lua API for building interactive widgets:
+
+| Module | Functions | Permission |
+|--------|-----------|------------|
+| `waio.timer` | `interval()`, `timeout()`, `cancel()` | — |
+| `waio.time` | `now()`, `format()`, `unix()` | — |
+| `waio.sys` | `battery()`, `cpu_usage()`, `memory()`, `temperatures()`, `disks()`, `uptime()`, `network()` | — |
+| `waio.fs` | `read_file()`, `list_dir()` | `fs_read` |
+| `waio.http` | `get()`, `post()` | `http` |
+| `waio.input` | `on_click()`, `on_scroll()`, `on_hover()`, `set_cursor()`, `get_layout()` | `input` |
+| `waio.exec` | `exec()` | `exec` |
+| `waio.audio` | `get_volume()`, `set_volume()`, `get_mute()`, `set_mute()`, `list_sinks()` | `system` |
+| `waio.notify` | `notify()` | `system` |
+| `waio.power` | `shutdown()`, `reboot()`, `suspend()`, `hibernate()`, `lock_screen()` | `system` |
+| `waio.backlight` | `get()`, `get_max()`, `set()`, `change()` | `system` |
+| `waio.bluetooth` | `scan()`, `connect()`, `disconnect()`, `enabled()`, `status()` | `system` |
+| `waio.wifi` | `scan()`, `connect()`, `current()`, `disconnect()`, `enabled()` | `network` |
+| `waio.clipboard` | `get()`, `set()` | — |
+
+All permission-gated modules have built-in rate limiting.
+
+See [Lua API Reference](docs/auras/lua-api.md) for full documentation.
 
 ## Contributing and Developing
 
@@ -101,19 +130,22 @@ cargo fmt --all -- --check  # format check
 
 ## Roadmap and Status
 
-Waio is in early alpha. The high-level plan for the project, in order:
+Waio is in beta. The high-level plan for the project, in order:
 
 |  #  | Step                                                    | Status |
 | :-: | ------------------------------------------------------- | :----: |
 |  1  | Core: Wayland lifecycle, per-widget rendering           |   ✅   |
 |  2  | Lua scripting with calloop-based timers                 |   ✅   |
 |  3  | Multi-monitor support, output auto-detection            |   ✅   |
-|  4  | Security: Lua sandbox, permissions (fs, http)           |   ✅   |
+|  4  | Security: Lua sandbox, permissions, rate limiting       |   ✅   |
 |  5  | Persistence: save/restore after restart                 |   ✅   |
 |  6  | Sub-component rendering (layered compositing)           |   ✅   |
-|  7  | Production: integration tests, signal handling          |   ❌   |
-|  8  | Desktop GUI app (Tauri + React) for widget management   |   ❌   |
-|  9  | Ecosystem: package registry, themes, widget gallery     |   ❌   |
+|  7  | Mouse/touch input events, hit-testing                   |   ✅   |
+|  8  | System modules: audio, exec, sysinfo, notify, power     |   ✅   |
+|  9  | Desktop modules: wifi, bluetooth, clipboard, backlight  |   ✅   |
+|  10 | Production: integration tests, signal handling          |   ❌   |
+|  11 | Desktop GUI app (Tauri + React) for widget management   |   ❌   |
+|  12 | Ecosystem: package registry, themes, widget gallery     |   ❌   |
 
 Additional details for each step in the big roadmap below:
 
@@ -143,6 +175,15 @@ send `TimerFire` events through a channel, which the main event loop
 receives and dispatches to Lua callbacks — all in the main thread, safely.
 No polling, no `try_recv()` in the hot path.
 
+#### Input Events and Hit-Testing
+
+Pointer events (click, scroll, hover) are received through Wayland
+`wl_seat` → `wl_pointer` and dispatched to Slint windows via
+`WindowEvent::PointerPressed/Moved/Released/Scrolled`. Multi-layer
+widgets use AABB hit-testing: the topmost layer containing the cursor
+receives the event. Lua scripts register callbacks via
+`waio.input.on_click(callback)`.
+
 #### Multi-Monitor Support, Output Auto-Detection
 
 Widgets can be bound to a specific output (monitor) via the `output` field
@@ -150,7 +191,7 @@ in the `.wa` config. If not specified, the daemon auto-detects the first
 connected output. Output tracking handles connect/disconnect events
 gracefully.
 
-#### Security: Lua Sandbox, Permissions (fs, http)
+#### Security: Lua Sandbox, Permissions, Rate Limiting
 
 The Lua sandbox has two layers of defense:
 
@@ -158,12 +199,19 @@ The Lua sandbox has two layers of defense:
 2. `sanitize_globals()` — nils dangerous functions (`os.execute`, `io.popen`, etc.)
 3. Restricted `_ENV` — per-widget environment with only safe modules
 
-Additional modules are gated behind explicit permissions:
+Additional modules are gated behind explicit permissions with rate limiting:
 
-- `waio.fs` — read-only file access with path traversal protection
-  (`canonicalize()` + `starts_with()`). Requires `fs_read` permission.
-- `waio.http` — HTTP GET/POST via ureq with URL validation, 10s timeout,
-  10MB max response. Requires `http` permission.
+| Module | Permission | Rate Limit |
+|--------|-----------|------------|
+| `waio.fs` | `fs_read` | 100/min |
+| `waio.http` | `http` | 60/min |
+| `waio.input` | `input` | — |
+| `waio.exec` | `exec` | 10/min |
+| `waio.audio`, `.notify`, `.power`, `.backlight`, `.bluetooth` | `system` | 20/min |
+| `waio.wifi` | `network` | 30/min |
+
+The `exec` module also supports command whitelisting via `exec_commands`
+in the `.wa` manifest.
 
 #### Persistence: Save/Restore After Restart
 
@@ -180,13 +228,6 @@ background first, then dynamic layers on top. Static layers (like
 backgrounds) are only rendered once, while dynamic layers update when their
 properties change. This approach eliminates ghosting artifacts that occur
 with Slint's `ReusedBuffer` partial rendering.
-
-#### Production: Integration Tests, Signal Handling
-
-Currently in progress. The project has 21 unit tests covering timer
-management, property store isolation, sandbox enforcement, and repository
-CRUD operations. Integration tests and proper signal handling (SIGTERM from
-systemd, SIGINT from Ctrl+C) are planned next.
 
 #### Desktop GUI App (Tauri + React)
 
