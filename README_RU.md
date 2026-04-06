@@ -62,7 +62,7 @@ Lua 5.4, конфигурацию в YAML. Демон компилирует, р
 Соберите из исходного кода:
 
 ```bash
-git clone https://github.com/waio/waio.git
+git clone https://github.com/nimscore/waio.git
 cd waio
 cargo build --release
 ```
@@ -71,7 +71,7 @@ cargo build --release
 
 ## Documentation
 
-Смотрите [документацию](https://github.com/waio/waio) (этот репозиторий)
+Смотрите [документацию](https://github.com/nimscore/waio) (этот репозиторий)
 для руководства по началу работы, описания формата `.wa` файлов и
 деталей архитектуры.
 

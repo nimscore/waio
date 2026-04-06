@@ -60,7 +60,7 @@ parser, and IPC protocol. Used by both the daemon and CLI.
 Build from source:
 
 ```bash
-git clone https://github.com/waio/waio.git
+git clone https://github.com/nimscore/waio.git
 cd waio
 cargo build --release
 ```
@@ -69,7 +69,7 @@ Binaries: `target/release/waio-daemon`, `target/release/waio-cli`.
 
 ## Documentation
 
-See the [documentation](https://github.com/waio/waio) (this repository) for
+See the [documentation](https://github.com/nimscore/waio) (this repository) for
 getting started guides, `.wa` file format reference, and architecture
 details.
 
