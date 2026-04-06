@@ -1,37 +1,63 @@
-# Waio
-
-> **Виджеты и панели для Wayland-рабочего стола. Одна платформа. Без Electron.**
-
+<!-- LOGO -->
+<h1>
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-Beta-yellow?style=flat-square" alt="Status">
-  <img src="https://img.shields.io/badge/Wayland-✓-00B3E0?style=flat-square" alt="Wayland">
-  <img src="https://img.shields.io/badge/Rust-2021-orange?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/Slint-1.15-2d7332?style=flat-square" alt="Slint">
-  <img src="https://img.shields.io/badge/Lua-5.4-2C2D72?style=flat-square&logo=lua" alt="Lua">
+  <!-- <img src="https://github.com/waio/waio/assets/logo.png" alt="Logo" width="128"> -->
+  <br>Waio
+</h1>
+  <p align="center">
+    Native Wayland widgets and panels. One platform. No Electron.
+    <br />
+    Declarative UI via Slint, scripted with Lua, rendered through SHM.
+    <br />
+    <a href="#about">About</a>
+    ·
+    <a href="#download">Download</a>
+    ·
+    <a href="#documentation">Documentation</a>
+    ·
+    <a href="#contributing">Contributing</a>
+    ·
+    <a href="#roadmap">Roadmap</a>
+    <br />
+    <a href="README_RU.md">🇷🇺 Читать на русском</a>
+  </p>
 </p>
 
----
+<br>
 
-## 🖼️ Что вы увидите
+> [!WARNING]
+>
+> Waio is in **early alpha** and is **not ready** for daily use. APIs, file
+> formats, and architecture are subject to breaking changes without notice.
+> Crashes, rendering artifacts, and data loss are expected behavior at this
+> stage. Use at your own risk.
 
-Панель на экране с часами и системным мониторингом. Прозрачный фон, плавные анимации, **0% CPU в простое**. Никаких Electron, никаких WebView — чистый Rust и Slint software rendering через Wayland SHM.
+## About
 
----
+Waio is a platform for building native Wayland widgets and panels without
+Electron, WebView, or any browser technology. While there are many ways to
+put things on your desktop — conky, waybar, polybar, eww — they all force
+you to choose between flexibility, performance, or simplicity. Waio provides
+all three.
 
-## ✨ Возможности
+A single `.wa` file describes everything: declarative UI in Slint, logic
+in Lua 5.4, configuration in YAML. The daemon compiles, renders, and
+manages widgets through wlr-layer-shell and Wayland SHM buffers.
 
-- 🎨 **Декларативный UI** — описывайте виджеты на `.wa` файлах (YAML + Slint + Lua)
-- 🦀 **Родный Wayland** — wlr-layer-shell protocol, SHM буферы, корректный lifecycle
-- ⚡ **Минимум ресурсов** — <1% CPU при обновлении раз в секунду
-- 🌙 **Lua-скрипты** — таймеры, системные метрики, HTTP-запросы прямо в виджете
-- 🔌 **Daemon + CLI** — демон работает в фоне, `waio-cli` управляет загрузкой/выгрузкой
-- 🔒 **Система разрешений** — каждый виджет ограничен явными permission'ами
+**`waio-daemon`** is a background process that owns the Wayland connection,
+compiles Slint components at runtime, executes Lua scripts in a sandboxed
+environment with a permission system, and communicates via JSON-RPC over a
+Unix socket.
 
----
+**`waio-cli`** is the command-line interface for loading, unloading,
+updating, and inspecting widgets.
 
-## 🚀 Быстрый старт
+**`waio-shared`** is the shared Rust library with entity types, `.wa` file
+parser, and IPC protocol. Used by both the daemon and CLI.
 
-### Сборка
+## Download
+
+Build from source:
 
 ```bash
 git clone https://github.com/waio/waio.git
@@ -39,121 +65,142 @@ cd waio
 cargo build --release
 ```
 
-### Запуск
+Binaries: `target/release/waio-daemon`, `target/release/waio-cli`.
+
+## Documentation
+
+See the [documentation](https://github.com/waio/waio) (this repository) for
+getting started guides, `.wa` file format reference, and architecture
+details.
+
+### Quick Start
 
 ```bash
-# 1. Запустите демон (в фоне)
+# Start the daemon (in the background)
 WAYLAND_DISPLAY=wayland-1 target/release/waio-daemon &
 
-# 2. Загрузите виджет из примера
+# Load a widget
 target/release/waio-cli load examples/clock-bar/aura.wa
-
-# Готово — часы отображаются на экране
 ```
 
-### Что происходит
+The widget appears on your screen. Edit `examples/clock-bar/aura.wa` and
+use `waio-cli update` to reload it.
 
-```
-waio-cli  ──JSON-RPC──▶  waio-daemon  ───wlr-layer-shell──▶  Comp
-                                                              │
-Slint render ◄── Lua timer ───┘                       SHM buffer
-```
+## Contributing and Developing
 
----
-
-## 📖 Формат `.wa` файла
-
-```yaml
----
-meta:
-  id: my-clock
-  name: Clock Widget
-  version: 1.0.0
-  permissions: [timer]
-
-config:
-  anchor: top
-  width: 1920
-  height: 40
-  exclusive_zone: 40
-
-<slint>
-export component AuraBar inherits Window {
-    width: 1920px; height: 40px;
-    background: #1a1a2e;
-    in property <string> time_text: "00:00:00";
-    Text {
-        text: parent.time_text;
-        color: #e0e0e0;
-        font-size: 20px;
-        x: 15px; y: 10px;
-    }
-}
-</slint>
-
-<lua>
-waio.timer.interval(1000, function()
-    local t = waio.time.now()
-    slint.set_property("time_text", t.str)
-end)
-</lua>
-```
-
-Один файл — один виджет. Без скрытых зависимостей.
-
----
-
-## 🏗️ Архитектура
-
-| Компонент | Роль |
-|-----------|------|
-| **waio-daemon** | Wayland-клиент, Slint-рендерер, Lua-рантайм, IPC-сервер |
-| **waio-cli** | CLI для загрузки/выгрузки/списка виджетов |
-| **waio-shared** | Общие типы, парсер `.waio` файлов, JSON-RPC протокол |
-| **examples/** | Готовые виджеты для быстрого старта |
-
-### Технологии
-
-- [**smithay-client-toolkit**](https://github.com/Smithay/client-toolkit) — Wayland клиент (wlr-layer-shell, SHM)
-- [**Slint**](https://slint.dev/) — декларативный UI-фреймворк + software renderer
-- [**mlua**](https://github.com/mlua-rs/mlua) — Lua 5.4 рантайм
-- [**calloop**](https://github.com/Smithay/calloop) — event loop для Wayland + таймеров
-
----
-
-## 🤝 Contributing
-
-Проект в активной разработке. Содержит только идею и минимум функционала!
-
-### Development
+If you have any ideas, issues, etc. regarding Waio, or would like to
+contribute through pull requests, please open an issue or submit a PR.
+Those who would like to get involved with Waio's development should start
+by reading the project structure and running the test suite.
 
 ```bash
-cargo check -p waio-daemon    # быстрая проверка
-cargo run -p waio-daemon       # запуск демона
-cargo run -p waio-cli -- list  # список загруженных виджетов
+cargo test --workspace      # run tests
+cargo clippy --workspace    # lint
+cargo fmt --all -- --check  # format check
 ```
 
-### Структура
+## Roadmap and Status
 
-```
-packages/
-├── daemon/     # waio-daemon (Wayland + Slint + Lua)
-├── cli/        # waio-cli (CLI клиент)
-└── shared/     # общие типы и протокол
-examples/       # готовые виджеты
-```
+Waio is in early alpha. The high-level plan for the project, in order:
 
----
+|  #  | Step                                                    | Status |
+| :-: | ------------------------------------------------------- | :----: |
+|  1  | Core: Wayland lifecycle, per-widget rendering           |   ✅   |
+|  2  | Lua scripting with calloop-based timers                 |   ✅   |
+|  3  | Multi-monitor support, output auto-detection            |   ✅   |
+|  4  | Security: Lua sandbox, permissions (fs, http)           |   ✅   |
+|  5  | Persistence: save/restore after restart                 |   ✅   |
+|  6  | Sub-component rendering (layered compositing)           |   ✅   |
+|  7  | Production: integration tests, signal handling          |   ❌   |
+|  8  | Desktop GUI app (Tauri + React) for widget management   |   ❌   |
+|  9  | Ecosystem: package registry, themes, widget gallery     |   ❌   |
 
-## 📋 Roadmap
+Additional details for each step in the big roadmap below:
 
-| Этап | Статус | Что |
-|------|--------|-----|
-| **Phase 1: Core** | ✅ Готово | Wayland lifecycle, per-aura rendering, Lua timers |
-| **Phase 2: QoL** | 🔜 В работе | Error handling, output tracking, multi-aura support |
-| **Phase 3: Polish** | 📋 Planned | Damage tracking, calloop timers, profiling |
-| **Phase 4: Ecosystem** | 💭 Ideas | Package registry, waio:// URLs, theme support |
+#### Core: Wayland Lifecycle, Per-Widget Rendering
 
----
+Waio implements the wlr-layer-shell protocol for creating panels and bars
+that sit on desktop edges, and SHM (shared memory) buffers for rendering
+pixels without GPU compositing. The surface lifecycle follows the correct
+wlr-layer-shell sequence: create surface → commit (no buffer) → compositor
+sends configure → ack configure → render first frame → frame callback loop.
 
-> «Сделай свой рабочий стол своим. Без компромиссов.»
+Each widget gets its own Wayland surface and Slint software renderer.
+Multi-layer widgets are supported: the daemon composites multiple Slint
+sub-windows into a single ARGB8888 buffer and sends it to the surface via
+`draw_precomposited()`.
+
+#### Lua Scripting with Calloop-Based Timers
+
+Lua 5.4 scripts run inside a sandboxed environment using mlua. Dangerous
+functions (`os.execute`, `io.popen`, `dofile`, `loadfile`, `debug.*`) are
+blocked at construction and at the globals level. Each widget runs in a
+restricted `_ENV` that only exposes language primitives and explicitly
+registered modules.
+
+Timers are implemented through `calloop::channel`: timer threads sleep and
+send `TimerFire` events through a channel, which the main event loop
+receives and dispatches to Lua callbacks — all in the main thread, safely.
+No polling, no `try_recv()` in the hot path.
+
+#### Multi-Monitor Support, Output Auto-Detection
+
+Widgets can be bound to a specific output (monitor) via the `output` field
+in the `.wa` config. If not specified, the daemon auto-detects the first
+connected output. Output tracking handles connect/disconnect events
+gracefully.
+
+#### Security: Lua Sandbox, Permissions (fs, http)
+
+The Lua sandbox has two layers of defense:
+
+1. `StdLib::ALL_SAFE` — blocks `debug` and C modules at construction
+2. `sanitize_globals()` — nils dangerous functions (`os.execute`, `io.popen`, etc.)
+3. Restricted `_ENV` — per-widget environment with only safe modules
+
+Additional modules are gated behind explicit permissions:
+
+- `waio.fs` — read-only file access with path traversal protection
+  (`canonicalize()` + `starts_with()`). Requires `fs_read` permission.
+- `waio.http` — HTTP GET/POST via ureq with URL validation, 10s timeout,
+  10MB max response. Requires `http` permission.
+
+#### Persistence: Save/Restore After Restart
+
+Widgets are persisted to `data_dir/{uuid}.json` on load and automatically
+restored when the daemon restarts. The configuration file at
+`~/.config/waio/config.yaml` controls the data directory path and is shared
+between the daemon and CLI.
+
+#### Sub-Component Rendering (Layered Compositing)
+
+Complex widgets can be built from multiple Slint components, each rendered
+to its own buffer. The daemon composites these layers into a final buffer:
+background first, then dynamic layers on top. Static layers (like
+backgrounds) are only rendered once, while dynamic layers update when their
+properties change. This approach eliminates ghosting artifacts that occur
+with Slint's `ReusedBuffer` partial rendering.
+
+#### Production: Integration Tests, Signal Handling
+
+Currently in progress. The project has 21 unit tests covering timer
+management, property store isolation, sandbox enforcement, and repository
+CRUD operations. Integration tests and proper signal handling (SIGTERM from
+systemd, SIGINT from Ctrl+C) are planned next.
+
+#### Desktop GUI App (Tauri + React)
+
+The long-term goal is a desktop application for managing widgets visually:
+create, edit, position, preview, and load widgets without touching the
+command line. Built with Tauri + React, communicating with the daemon over
+the existing JSON-RPC IPC.
+
+#### Ecosystem: Package Registry, Themes, Widget Gallery
+
+The dream is a community where people share widgets, themes, and
+configurations. A package registry would make it easy to discover and
+install widgets from other users.
+
+## License
+
+MIT
