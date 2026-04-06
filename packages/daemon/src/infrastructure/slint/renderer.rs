@@ -212,6 +212,9 @@ impl SlintRenderer {
                 let fs_access = lua::fs::FsAccess::new(vec![
                     std::env::current_dir().unwrap_or_default(),
                     dirs::config_dir().unwrap_or_default().join("waio/widgets"),
+                    // Allow reading sysfs/procfs for system monitoring widgets.
+                    std::path::PathBuf::from("/proc"),
+                    std::path::PathBuf::from("/sys"),
                 ]);
                 let fs_module = lua::fs::create_module(&lua, fs_access)?;
                 waio_globals.set("fs", fs_module)?;

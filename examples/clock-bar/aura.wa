@@ -2,9 +2,9 @@
 meta:
   id: 550e8400-e29b-41d4-a716-446655440000
   name: Clock Bar
-  version: 2.0.0
+  version: 3.0.0
   author: Waio Team
-  description: Upper panel with clock, date, fs and http demos
+  description: Upper panel with clock, date, system monitors, fs and http demos
   permissions:
     - timer
     - system_time
@@ -25,14 +25,12 @@ export component Background inherits Window {
     width: 1920px;
     height: 40px;
 
-    // Background fill
     Rectangle {
         width: parent.width;
         height: parent.height;
         background: #1a1a1a;
     }
 
-    // Bottom line
     Rectangle {
         width: parent.width;
         height: 1px;
@@ -41,9 +39,9 @@ export component Background inherits Window {
     }
 }
 
-// Time text layer — rendered when time_text changes
+// Time text layer
 export component TimeLayer inherits Window {
-    width: 130px;
+    width: 100px;
     height: 24px;
     background: transparent;
     in property <string> time_text: "00:00:00";
@@ -56,9 +54,9 @@ export component TimeLayer inherits Window {
     }
 }
 
-// Date text layer — rendered when date_text changes
+// Date text layer
 export component DateLayer inherits Window {
-    width: 120px;
+    width: 100px;
     height: 20px;
     background: transparent;
     in property <string> date_text: "1970-01-01";
@@ -70,9 +68,65 @@ export component DateLayer inherits Window {
     }
 }
 
-// FS demo layer — shows one word at a time from a file
+// CPU usage layer (from /proc/stat)
+export component CpuLayer inherits Window {
+    width: 80px;
+    height: 20px;
+    background: transparent;
+    in property <string> cpu_text: "cpu: --";
+
+    Text {
+        text: parent.cpu_text;
+        color: #f97316;
+        font-size: 13px;
+    }
+}
+
+// Temperature layer (from /sys/class/thermal)
+export component TempLayer inherits Window {
+    width: 80px;
+    height: 20px;
+    background: transparent;
+    in property <string> temp_text: "temp: --";
+
+    Text {
+        text: parent.temp_text;
+        color: #ef4444;
+        font-size: 13px;
+    }
+}
+
+// Battery layer (from /sys/class/power_supply)
+export component BatteryLayer inherits Window {
+    width: 100px;
+    height: 20px;
+    background: transparent;
+    in property <string> batt_text: "bat: --";
+
+    Text {
+        text: parent.batt_text;
+        color: #22c55e;
+        font-size: 13px;
+    }
+}
+
+// Network RX layer (from /sys/class/net)
+export component NetLayer inherits Window {
+    width: 120px;
+    height: 20px;
+    background: transparent;
+    in property <string> net_text: "net: --";
+
+    Text {
+        text: parent.net_text;
+        color: #a78bfa;
+        font-size: 13px;
+    }
+}
+
+// FS demo layer — shows sysfs reading status
 export component FsLayer inherits Window {
-    width: 260px;
+    width: 180px;
     height: 20px;
     background: transparent;
     in property <string> fs_text: "fs: loading...";
@@ -86,7 +140,7 @@ export component FsLayer inherits Window {
 
 // HTTP demo layer — shows post title from JSON API
 export component HttpLayer inherits Window {
-    width: 280px;
+    width: 200px;
     height: 20px;
     background: transparent;
     in property <string> http_text: "http: loading...";
@@ -100,15 +154,21 @@ export component HttpLayer inherits Window {
 </slint>
 
 <layout>
-Background:  { x: 0,   y: 0, w: 1920, h: 40, dynamic: false }
-TimeLayer:   { x: 10,  y: 10, w: 130,  h: 24 }
-DateLayer:   { x: 150, y: 12, w: 120,  h: 20 }
-FsLayer:     { x: 300, y: 12, w: 260,  h: 20 }
-HttpLayer:   { x: 580, y: 12, w: 280,  h: 20 }
+Background:   { x: 0,    y: 0,  w: 1920, h: 40, dynamic: false }
+TimeLayer:    { x: 10,   y: 10, w: 100,  h: 24 }
+DateLayer:    { x: 120,  y: 12, w: 100,  h: 20 }
+CpuLayer:     { x: 230,  y: 12, w: 80,   h: 20 }
+TempLayer:    { x: 320,  y: 12, w: 80,   h: 20 }
+BatteryLayer: { x: 410,  y: 12, w: 100,  h: 20 }
+NetLayer:     { x: 520,  y: 12, w: 120,  h: 20 }
+FsLayer:      { x: 650,  y: 12, w: 180,  h: 20 }
+HttpLayer:    { x: 840,  y: 12, w: 200,  h: 20 }
 </layout>
 
 <lua>
+-- =============================================
 -- Time and date: update every second
+-- =============================================
 waio.timer.interval(1000, function()
     local time = waio.time.now()
     local date = waio.time.format("%Y-%m-%d")
@@ -117,47 +177,186 @@ waio.timer.interval(1000, function()
     slint.set_property("DateLayer.date_text", date)
 end)
 
--- FS demo: read file and show one word at a time, rotating every 2 seconds
-local fs_words = {}
-local fs_word_idx = 0
+-- =============================================
+-- System monitoring via waio.fs (sysfs/procfs)
+-- =============================================
 
--- Read README.md and split into words
-local ok, content = pcall(function()
-    return waio.fs.read_file("README.md")
-end)
-if ok and content then
-    -- Split by whitespace into words
-    for word in content:gmatch("%S+") do
-        table.insert(fs_words, word)
-    end
-    fs_word_idx = 1
-end
+--- CPU usage: parse /proc/stat
+-- Returns percentage between two samples
+local prev_idle = 0
+local prev_total = 0
+local cpu_first_sample = true
 
-waio.timer.interval(2000, function()
-    if #fs_words == 0 then
-        slint.set_property("FsLayer.fs_text", "fs: no data")
+waio.timer.interval(1000, function()
+    local ok, stat = pcall(function()
+        return waio.fs.read_file("/proc/stat")
+    end)
+    if not ok or not stat then
+        if not cpu_first_sample then
+            slint.set_property("CpuLayer.cpu_text", "cpu: N/A")
+        end
         return
     end
-    local word = fs_words[fs_word_idx]
-    -- Truncate long words for display
-    if #word > 25 then word = word:sub(1, 25) .. "…" end
-    slint.set_property("FsLayer.fs_text", "fs: " .. word .. " [" .. fs_word_idx .. "/" .. #fs_words .. "]")
-    fs_word_idx = fs_word_idx + 1
-    if fs_word_idx > #fs_words then fs_word_idx = 1 end
+
+    -- Parse first line: cpu user nice system idle iowait irq softirq steal guest guest_nice
+    local line = stat:match("cpu[^\n]*")
+    if not line then return end
+
+    local nums = {}
+    for n in line:gmatch("%d+") do
+        table.insert(nums, tonumber(n))
+    end
+    if #nums < 4 then return end
+
+    -- Idle = idle (col 4) + iowait (col 5)
+    local user     = nums[1] or 0
+    local nice     = nums[2] or 0
+    local system   = nums[3] or 0
+    local idle     = nums[4] or 0
+    local iowait   = nums[5] or 0
+    local irq      = nums[6] or 0
+    local softirq  = nums[7] or 0
+    local steal    = nums[8] or 0
+
+    local total = user + nice + system + idle + iowait + irq + softirq + steal
+    local idle_time = idle + iowait
+
+    -- Skip first sample (no previous data to compare)
+    if cpu_first_sample then
+        cpu_first_sample = false
+        prev_idle = idle_time
+        prev_total = total
+        slint.set_property("CpuLayer.cpu_text", "cpu: --")
+        return
+    end
+
+    local diff_total = total - prev_total
+    local diff_idle = idle_time - prev_idle
+
+    prev_idle = idle_time
+    prev_total = total
+
+    if diff_total > 0 then
+        local usage = math.floor((1 - diff_idle / diff_total) * 100)
+        slint.set_property("CpuLayer.cpu_text", "cpu: " .. usage .. "%")
+    end
 end)
 
--- HTTP demo: fetch posts and show their titles, cycling every 8 seconds
+--- Temperature: read /sys/class/thermal/thermal_zone0/temp
+waio.timer.interval(3000, function()
+    local ok, content = pcall(function()
+        return waio.fs.read_file("/sys/class/thermal/thermal_zone0/temp")
+    end)
+    if ok and content then
+        -- temp is in millidegrees
+        local temp = tonumber(content:match("%d+"))
+        if temp then
+            local celsius = math.floor(temp / 1000)
+            slint.set_property("TempLayer.temp_text", "temp: " .. celsius .. "°C")
+            return
+        end
+    end
+    slint.set_property("TempLayer.temp_text", "temp: N/A")
+end)
+
+--- Battery: read /sys/class/power_supply/BAT0/
+waio.timer.interval(5000, function()
+    local ok_cap, cap = pcall(function()
+        return waio.fs.read_file("/sys/class/power_supply/BAT0/capacity")
+    end)
+    local ok_status, status = pcall(function()
+        return waio.fs.read_file("/sys/class/power_supply/BAT0/status")
+    end)
+
+    if ok_cap and cap then
+        local level = tonumber(cap:match("%d+"))
+        local st = ok_status and status:gsub("%s+", "") or "??"
+        local icon = st == "Charging" and "⚡" or "🔋"
+        slint.set_property("BatteryLayer.batt_text", icon .. " " .. level .. "% " .. st)
+    else
+        slint.set_property("BatteryLayer.batt_text", "bat: N/A")
+    end
+end)
+
+--- Network: read RX bytes from first real (non-virtual) interface
+waio.timer.interval(2000, function()
+    local ok, listing = pcall(function()
+        return waio.fs.list_dir("/sys/class/net")
+    end)
+    if not ok or not listing then
+        slint.set_property("NetLayer.net_text", "net: N/A")
+        return
+    end
+
+    -- Virtual interfaces to skip
+    local virtual_prefixes = {"lo", "docker", "veth", "virbr", "br-", "tun", "tap", "wg"}
+
+    -- Find first real interface
+    for _, iface in ipairs(listing) do
+        -- Skip virtual interfaces
+        local is_virtual = false
+        for _, prefix in ipairs(virtual_prefixes) do
+            if iface:sub(1, #prefix) == prefix then
+                is_virtual = true
+                break
+            end
+        end
+        if not is_virtual then
+            local ok_rx, rx = pcall(function()
+                return waio.fs.read_file("/sys/class/net/" .. iface .. "/statistics/rx_bytes")
+            end)
+            if ok_rx and rx then
+                local bytes = tonumber(rx:match("%d+"))
+                if bytes then
+                    local mb = string.format("%.1f", bytes / 1048576)
+                    slint.set_property("NetLayer.net_text", "net: " .. mb .. " MB (" .. iface .. ")")
+                end
+            end
+            return
+        end
+    end
+    slint.set_property("NetLayer.net_text", "net: N/A")
+end)
+
+-- =============================================
+-- FS demo: show which sysfs paths are readable
+-- =============================================
+local fs_checks = {
+    { path = "/proc/stat",              label = "/proc/stat" },
+    { path = "/proc/uptime",            label = "/proc/uptime" },
+    { path = "/sys/class/thermal/thermal_zone0/temp", label = "thermal" },
+    { path = "/sys/class/power_supply/BAT0/capacity", label = "battery" },
+}
+local fs_idx = 0
+
+waio.timer.interval(4000, function()
+    fs_idx = fs_idx + 1
+    if fs_idx > #fs_checks then fs_idx = 1 end
+
+    local check = fs_checks[fs_idx]
+    local ok, content = pcall(function()
+        return waio.fs.read_file(check.path)
+    end)
+    if ok and content then
+        local preview = content:sub(1, 30):gsub("\n", "\\n")
+        slint.set_property("FsLayer.fs_text", "fs: " .. check.label .. " ✓ (" .. #content .. "b)")
+    else
+        slint.set_property("FsLayer.fs_text", "fs: " .. check.label .. " ✗")
+    end
+end)
+
+-- =============================================
+-- HTTP demo: fetch posts and show titles
+-- =============================================
 local http_posts = {}
 local http_idx = 0
 
--- Fetch 5 posts once, then cycle through them
 waio.timer.timeout(1500, function()
     for i = 1, 5 do
         local ok, resp = pcall(function()
             return waio.http.get("https://jsonplaceholder.typicode.com/posts/" .. i)
         end)
         if ok and resp and resp.status == 200 then
-            -- Extract title from JSON body
             local title = resp.body:match('"title"%s*:%s*"([^"]*)"')
             if title then
                 table.insert(http_posts, { id = i, title = title })
@@ -167,7 +366,7 @@ waio.timer.timeout(1500, function()
     if #http_posts > 0 then
         http_idx = 1
         local post = http_posts[http_idx]
-        slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 40))
+        slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 30))
     else
         slint.set_property("HttpLayer.http_text", "http: failed to load")
     end
@@ -178,8 +377,8 @@ waio.timer.interval(8000, function()
     http_idx = http_idx + 1
     if http_idx > #http_posts then http_idx = 1 end
     local post = http_posts[http_idx]
-    slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 40))
+    slint.set_property("HttpLayer.http_text", "http: #" .. post.id .. " — " .. post.title:sub(1, 30))
 end)
 
-print("Clock Bar Aura loaded with fs + http demos!")
+print("Clock Bar v3.0 loaded — sysfs/procfs monitors active!")
 </lua>
