@@ -3,6 +3,28 @@ use serde::{Deserialize, Serialize};
 /// Current IPC protocol version. Increment on breaking changes.
 pub const PROTOCOL_VERSION: &str = "1.0.0";
 
+/// Standard JSON-RPC 2.0 error codes.
+pub mod error_codes {
+    /// Invalid JSON was received by the server.
+    pub const PARSE_ERROR: i32 = -32700;
+    /// Invalid Request object.
+    pub const INVALID_REQUEST: i32 = -32600;
+    /// Method does not exist.
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    /// Invalid method parameter(s).
+    pub const INVALID_PARAMS: i32 = -32602;
+    /// Internal JSON-RPC error.
+    pub const INTERNAL_ERROR: i32 = -32603;
+    /// Server error — application-specific codes start here.
+    pub const SERVER_ERROR: i32 = -32000;
+    /// Aura not found.
+    pub const NOT_FOUND: i32 = -32001;
+    /// Aura already loaded.
+    pub const ALREADY_EXISTS: i32 = -32002;
+    /// Persistence/storage error.
+    pub const PERSISTENCE_ERROR: i32 = -32003;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,

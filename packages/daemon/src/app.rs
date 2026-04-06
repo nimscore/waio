@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 use waio_shared::config::WaioConfig;
 use waio_shared::entity::{Aura, AuraFile};
 use waio_shared::protocol::{
-    DaemonMethod, JsonRpcRequest, JsonRpcResponse, rpc_error, rpc_success,
+    DaemonMethod, JsonRpcRequest, JsonRpcResponse, error_codes, rpc_error, rpc_success,
 };
 
 pub enum IpcCommand {
@@ -46,6 +46,7 @@ pub fn run() -> Result<()> {
     // Load configuration: WAIO_CONFIG env → ~/.config/waio/config.yaml → create default
     let config = WaioConfig::load()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    config.validate();
 
     init_logging(&config.log_level());
 
@@ -172,9 +173,60 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // 6. Main dispatch loop.
+    // 6. Single instance: create PID file with flock.
+    let state_dir = dirs::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("waio");
+    let _ = std::fs::create_dir_all(&state_dir);
+    let pid_path = state_dir.join("waio-daemon.pid");
+    let pid_file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&pid_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            anyhow::bail!("Failed to open PID file {}: {}", pid_path.display(), e);
+        }
+    };
+    // Try to acquire exclusive lock (non-blocking).
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(pid_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            // Another instance holds the lock.
+            if let Ok(content) = std::fs::read_to_string(&pid_path) {
+                anyhow::bail!(
+                    "Another waio-daemon instance is running (PID: {}). \
+                     If this is stale, remove {} and try again.",
+                    content.trim(),
+                    pid_path.display()
+                );
+            } else {
+                anyhow::bail!(
+                    "Another waio-daemon instance is running. Remove {} and try again.",
+                    pid_path.display()
+                );
+            }
+        }
+    }
+    // Write our PID.
+    let our_pid = std::process::id();
+    let _ = std::fs::write(&pid_path, our_pid.to_string());
+    info!("PID file created: {} (PID {})", pid_path.display(), our_pid);
+
+    // 7. Main dispatch loop.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_for_handler = shutdown_flag.clone();
+
+    // Set up signal handlers: SIGTERM (systemd) + SIGINT (Ctrl+C).
+    let shutdown_for_sig = shutdown_flag.clone();
+    ctrlc::set_handler(move || {
+        info!("Signal received, initiating graceful shutdown...");
+        shutdown_for_sig.store(true, Ordering::Relaxed);
+    }).expect("Failed to set signal handler");
 
     loop {
         // Dispatch Wayland events (configure, frame, closed, etc.).
@@ -233,6 +285,19 @@ pub fn run() -> Result<()> {
     if let Err(e) = renderer.shutdown() {
         tracing::warn!("Shutdown error: {}", e);
     }
+
+    // Remove PID file.
+    let _ = std::fs::remove_file(&pid_path);
+    // PID file lock is released automatically when pid_file is dropped.
+    info!("PID file removed: {}", pid_path.display());
+
+    // Remove stale socket file.
+    let socket_path = std::path::PathBuf::from(config.socket_path());
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+        info!("Socket file removed: {}", socket_path.display());
+    }
+
     info!("Waio Daemon shutdown complete");
 
     Ok(())
@@ -305,7 +370,7 @@ fn handle_request(
 
                     if auras.contains_key(&aura_id) {
                         return rpc_error(
-                            -32002,
+                            error_codes::ALREADY_EXISTS,
                             &format!("Aura '{}' already loaded", aura_id),
                             None::<String>,
                             request.id,
@@ -342,7 +407,7 @@ fn handle_request(
             };
 
             if !auras.contains_key(&id) {
-                return rpc_error(-32001, "Aura not found", None::<String>, request.id);
+                return rpc_error(error_codes::NOT_FOUND, "Aura not found", None::<String>, request.id);
             }
 
             match renderer.remove_aura(&id) {

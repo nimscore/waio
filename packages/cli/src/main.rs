@@ -16,26 +16,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Load an Aura from a .wa file
+    /// Load a widget (.wa file) into the running daemon
     Load {
         /// Path to the .wa file
         path: PathBuf,
     },
-    /// Update a loaded Aura from a .wa file
+    /// Update an existing widget with new .wa file content
     Update {
-        /// ID of the loaded Aura
+        /// UUID of the loaded widget to update
         id: String,
         /// Path to the new .wa file
         path: PathBuf,
     },
-    /// Unload an Aura by ID
+    /// Unload a widget by its UUID
     Unload {
-        /// ID of the Aura to unload
+        /// UUID of the widget to unload
         id: String,
     },
-    /// Show daemon status and loaded auras
+    /// Show daemon status and list loaded widgets
     Status,
-    /// Stop the daemon
+    /// Gracefully shut down the waio-daemon
     Stop,
 }
 

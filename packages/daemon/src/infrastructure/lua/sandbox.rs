@@ -93,7 +93,6 @@ pub fn create_restricted_env(lua: &Lua) -> LuaResult<LuaTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlua::prelude::*;
     use mlua::StdLib;
 
     fn make_sandbox() -> Lua {

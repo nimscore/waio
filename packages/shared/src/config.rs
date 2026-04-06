@@ -89,6 +89,29 @@ impl WaioConfig {
         Self::from_path(&config_path)
     }
 
+    /// Validate config values. Warns and applies fallbacks for invalid values.
+    pub fn validate(&self) {
+        // Validate socket_path is not empty.
+        if self.socket_path.is_none() || self.socket_path.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
+            eprintln!("Warning: socket_path is empty, using default: {}", Self::default_socket_path());
+        }
+
+        // Validate log_level can be parsed by EnvFilter.
+        if let Some(ref level) = self.log_level {
+            if level.is_empty() {
+                eprintln!("Warning: log_level is empty, using default: {}", Self::default_log_level());
+            }
+        }
+
+        // Validate data_dir exists or can be created.
+        let data_dir = PathBuf::from(self.data_dir());
+        if !data_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("Warning: cannot create data_dir {}: {}", data_dir.display(), e);
+            }
+        }
+    }
+
     /// Load config from a specific YAML file.
     pub fn from_path(path: &std::path::Path) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
